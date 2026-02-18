@@ -23,7 +23,7 @@ pub fn create_staging(project_root: &Path, base_package: &str) -> Result<PathBuf
     // Create parent directories for symlink
     if let Some(parent) = symlink_location.parent() {
         fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directories for symlink"))?;
+            .with_context(|| "failed to create parent directories for symlink".to_string())?;
     }
 
     // Calculate relative path from symlink to src/
