@@ -1,7 +1,10 @@
 mod cli;
 mod commands;
+mod compiler;
 mod errors;
+mod jar;
 mod manifest;
+mod staging;
 
 use anyhow::Result;
 use clap::Parser;
@@ -14,10 +17,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::New { name, lib } => commands::new::exec(&name, lib),
         Command::Init { lib } => commands::init::exec(lib),
-        Command::Build => {
-            eprintln!("error: `build` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Build => commands::build::exec(),
         Command::Run { .. } => {
             eprintln!("error: `run` is not yet implemented");
             std::process::exit(1);
@@ -30,10 +30,7 @@ fn main() -> Result<()> {
             eprintln!("error: `check` is not yet implemented");
             std::process::exit(1);
         }
-        Command::Clean => {
-            eprintln!("error: `clean` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Clean => commands::clean::exec(),
         Command::Add { .. } => {
             eprintln!("error: `add` is not yet implemented");
             std::process::exit(1);

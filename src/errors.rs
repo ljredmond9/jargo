@@ -14,6 +14,18 @@ pub enum JargoError {
     #[error("could not determine directory name")]
     NoDirName,
 
+    #[error("Jargo.toml not found in current directory")]
+    ManifestNotFound,
+
+    #[error("failed to parse Jargo.toml: {0}")]
+    ManifestParse(String),
+
+    #[error("javac compilation failed")]
+    CompilationFailed,
+
+    #[error("javac not found in PATH")]
+    JavacNotFound,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
