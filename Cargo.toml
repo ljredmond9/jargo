@@ -2,6 +2,7 @@
 name = "jargo"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/ljredmond9/jargo"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -13,3 +14,8 @@ zip = "2.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
