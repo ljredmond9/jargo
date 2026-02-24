@@ -20,10 +20,19 @@ fn default_type() -> String {
     "app".to_string()
 }
 
+/// Represents the optional [run] section of Jargo.toml.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct RunConfig {
+    #[serde(rename = "jvm-args", default, skip_serializing_if = "Vec::is_empty")]
+    pub jvm_args: Vec<String>,
+}
+
 /// Top-level Jargo.toml structure for generation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JargoToml {
     pub package: PackageManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunConfig>,
 }
 
 impl JargoToml {
@@ -37,6 +46,7 @@ impl JargoToml {
                 base_package: None,
                 main_class: None,
             },
+            run: None,
         }
     }
 
@@ -50,6 +60,7 @@ impl JargoToml {
                 base_package: Some(base_package.to_string()),
                 main_class: None,
             },
+            run: None,
         }
     }
 
@@ -83,6 +94,14 @@ impl JargoToml {
     /// Check if this is an app project.
     pub fn is_app(&self) -> bool {
         self.package.project_type == "app"
+    }
+
+    /// Get JVM args from the [run] section, defaulting to empty.
+    pub fn get_jvm_args(&self) -> &[String] {
+        match &self.run {
+            Some(run_config) => &run_config.jvm_args,
+            None => &[],
+        }
     }
 }
 

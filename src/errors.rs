@@ -26,6 +26,12 @@ pub enum JargoError {
     #[error("javac not found in PATH")]
     JavacNotFound,
 
+    #[error("java not found in PATH")]
+    JavaNotFound,
+
+    #[error("`jargo run` requires an app project (type = \"app\")")]
+    NotAnApp,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
