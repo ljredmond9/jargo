@@ -18,10 +18,7 @@ fn main() -> Result<()> {
         Command::New { name, lib } => commands::new::exec(&name, lib),
         Command::Init { lib } => commands::init::exec(lib),
         Command::Build => commands::build::exec(),
-        Command::Run { .. } => {
-            eprintln!("error: `run` is not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Run { args } => commands::run::exec(args),
         Command::Test => {
             eprintln!("error: `test` is not yet implemented");
             std::process::exit(1);

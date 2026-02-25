@@ -201,6 +201,97 @@ fn test_rebuild_after_clean() {
 }
 
 #[test]
+fn test_run_simple_app() {
+    let temp = TempDir::new().unwrap();
+    let project_path = temp.path().join("test-app");
+
+    // Create project
+    Command::new(jargo_bin())
+        .args(&["new", "test-app"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    // Run the project
+    let output = Command::new(jargo_bin())
+        .arg("run")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "jargo run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Compiling test-app"));
+    assert!(stdout.contains("Running test-app"));
+    assert!(stdout.contains("Hello, World!"));
+}
+
+#[test]
+fn test_run_lib_project_fails() {
+    let temp = TempDir::new().unwrap();
+    let project_path = temp.path().join("test-lib");
+
+    // Create lib project
+    Command::new(jargo_bin())
+        .args(&["new", "--lib", "test-lib"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    // Run should fail for lib project
+    let output = Command::new(jargo_bin())
+        .arg("run")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("app"));
+}
+
+#[test]
+fn test_run_with_jvm_args() {
+    let temp = TempDir::new().unwrap();
+    let project_path = temp.path().join("test-app");
+
+    // Create project
+    Command::new(jargo_bin())
+        .args(&["new", "test-app"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+
+    // Add [run] section with jvm-args to Jargo.toml
+    let manifest_path = project_path.join("Jargo.toml");
+    let content = std::fs::read_to_string(&manifest_path).unwrap();
+    let content = format!("{}\n[run]\njvm-args = [\"-Xmx256m\"]\n", content);
+    std::fs::write(&manifest_path, content).unwrap();
+
+    // Run the project (jvm-args should be accepted without error)
+    let output = Command::new(jargo_bin())
+        .arg("run")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "jargo run with jvm-args failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Hello, World!"));
+}
+
+#[test]
 fn test_manifest_not_found_error() {
     let temp = TempDir::new().unwrap();
 
