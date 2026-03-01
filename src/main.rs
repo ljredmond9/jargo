@@ -3,6 +3,7 @@ mod commands;
 mod compiler;
 mod errors;
 mod jar;
+mod lockfile;
 mod manifest;
 mod staging;
 
