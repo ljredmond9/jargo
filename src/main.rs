@@ -3,9 +3,11 @@ mod cli;
 mod commands;
 mod compiler;
 mod errors;
+mod gradle_module;
 mod jar;
 mod lockfile;
 mod manifest;
+mod pom;
 mod staging;
 
 use anyhow::Result;
