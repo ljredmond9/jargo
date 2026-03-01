@@ -8,6 +8,8 @@ pub struct LockedDependency {
     pub group: String,
     pub artifact: String,
     pub version: String,
+    /// Effective scope: `"compile"` (compile + runtime classpath) or `"runtime"` (runtime only).
+    pub scope: String,
     pub sha256: String,
 }
 
@@ -36,16 +38,13 @@ impl LockFile {
     pub fn read(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("failed to parse {}", path.display()))
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
     }
 
     /// Serialize and write this lock file to disk.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("failed to serialize lock file")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()))
+        let content = toml::to_string_pretty(self).context("failed to serialize lock file")?;
+        std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
     }
 }
 
@@ -77,12 +76,14 @@ mod tests {
                     group: "com.google.guava".to_string(),
                     artifact: "guava".to_string(),
                     version: "33.0.0-jre".to_string(),
+                    scope: "compile".to_string(),
                     sha256: "abc123".to_string(),
                 },
                 LockedDependency {
                     group: "org.apache.commons".to_string(),
                     artifact: "commons-lang3".to_string(),
                     version: "3.14.0".to_string(),
+                    scope: "runtime".to_string(),
                     sha256: "def456".to_string(),
                 },
             ],
@@ -103,6 +104,7 @@ mod tests {
                 group: "com.example".to_string(),
                 artifact: "foo".to_string(),
                 version: "1.0.0".to_string(),
+                scope: "compile".to_string(),
                 sha256: "deadbeef".to_string(),
             }],
         };
@@ -112,6 +114,7 @@ mod tests {
         assert!(s.contains("group = \"com.example\""));
         assert!(s.contains("artifact = \"foo\""));
         assert!(s.contains("version = \"1.0.0\""));
+        assert!(s.contains("scope = \"compile\""));
         assert!(s.contains("sha256 = \"deadbeef\""));
     }
 
@@ -128,12 +131,14 @@ mod tests {
 group = "com.google.guava"
 artifact = "guava"
 version = "33.0.0-jre"
+scope = "compile"
 sha256 = "abc123"
 
 [[dependency]]
 group = "com.google.code.findbugs"
 artifact = "jsr305"
 version = "3.0.2"
+scope = "compile"
 sha256 = "def456"
 "#;
         let lock: LockFile = toml::from_str(toml_str).unwrap();

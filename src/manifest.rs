@@ -81,7 +81,11 @@ pub struct JargoToml {
     pub run: Option<RunConfig>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub dependencies: HashMap<String, DependencyValue>,
-    #[serde(rename = "dev-dependencies", default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        rename = "dev-dependencies",
+        default,
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     pub dev_dependencies: HashMap<String, DependencyValue>,
 }
 
@@ -186,7 +190,13 @@ fn parse_dependency_map(map: &HashMap<String, DependencyValue>) -> Result<Vec<De
                 (spec.version.clone(), scope, spec.expose.unwrap_or(false))
             }
         };
-        deps.push(Dependency { group, artifact, version, scope, expose });
+        deps.push(Dependency {
+            group,
+            artifact,
+            version,
+            scope,
+            expose,
+        });
     }
 
     // Sort for determinism — HashMap iteration order is unspecified.

@@ -30,13 +30,19 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     // Check for cached .module
     let module_path = dir.join(artifact_filename(artifact, version, "module"));
     if module_path.exists() {
-        return Ok(FetchedMetadata { path: module_path, format: MetadataFormat::Module });
+        return Ok(FetchedMetadata {
+            path: module_path,
+            format: MetadataFormat::Module,
+        });
     }
 
     // Check for cached .pom
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
-        return Ok(FetchedMetadata { path: pom_path, format: MetadataFormat::Pom });
+        return Ok(FetchedMetadata {
+            path: pom_path,
+            format: MetadataFormat::Pom,
+        });
     }
 
     // Not cached — fetch from Maven Central
@@ -46,14 +52,20 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     let module_url = maven_central_url(group, artifact, version, "module");
     if try_download(&client, &module_url, &module_path)? {
         println!("  Fetching  {}:{}:{} (.module)", group, artifact, version);
-        return Ok(FetchedMetadata { path: module_path, format: MetadataFormat::Module });
+        return Ok(FetchedMetadata {
+            path: module_path,
+            format: MetadataFormat::Module,
+        });
     }
 
     // Fall back to .pom
     let pom_url = maven_central_url(group, artifact, version, "pom");
     println!("  Fetching  {}:{}:{}", group, artifact, version);
     if try_download(&client, &pom_url, &pom_path)? {
-        return Ok(FetchedMetadata { path: pom_path, format: MetadataFormat::Pom });
+        return Ok(FetchedMetadata {
+            path: pom_path,
+            format: MetadataFormat::Pom,
+        });
     }
 
     Err(JargoError::DependencyNotFound(
@@ -110,7 +122,10 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
 ///
 /// Structure mirrors Maven Central: `~/.jargo/cache/{group-path}/{artifact}/{version}/`
 pub fn artifact_dir(group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-    Ok(cache_base()?.join(group_to_path(group)).join(artifact).join(version))
+    Ok(cache_base()?
+        .join(group_to_path(group))
+        .join(artifact)
+        .join(version))
 }
 
 // --- Pure helpers (pub for unit testing) ---
@@ -210,8 +225,14 @@ mod tests {
 
     #[test]
     fn test_artifact_filename() {
-        assert_eq!(artifact_filename("guava", "33.0.0-jre", "jar"), "guava-33.0.0-jre.jar");
-        assert_eq!(artifact_filename("guava", "33.0.0-jre", "pom"), "guava-33.0.0-jre.pom");
+        assert_eq!(
+            artifact_filename("guava", "33.0.0-jre", "jar"),
+            "guava-33.0.0-jre.jar"
+        );
+        assert_eq!(
+            artifact_filename("guava", "33.0.0-jre", "pom"),
+            "guava-33.0.0-jre.pom"
+        );
         assert_eq!(
             artifact_filename("commons-lang3", "3.14.0", "jar"),
             "commons-lang3-3.14.0.jar"
@@ -237,7 +258,10 @@ mod tests {
         // SHA-256 of empty string is well-known
         fs::write(&file, b"").unwrap();
         let hash = compute_sha256(&file).unwrap();
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -247,7 +271,10 @@ mod tests {
         fs::write(&file, b"hello world").unwrap();
         let hash = compute_sha256(&file).unwrap();
         // SHA-256("hello world") — verified against sha2 crate output
-        assert_eq!(hash, "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
         // Also verify the output format: 64 lowercase hex chars
         assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));

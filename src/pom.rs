@@ -14,7 +14,7 @@ pub struct TransitiveDep {
 }
 
 /// The scope of a transitive dependency as seen from its metadata file.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TransitiveScope {
     /// Appears on both compile and runtime classpaths.
     Compile,
@@ -34,8 +34,7 @@ pub enum TransitiveScope {
 pub fn parse_pom(path: &Path) -> Result<Vec<TransitiveDep>> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read POM at {}", path.display()))?;
-    parse_pom_str(&content)
-        .with_context(|| format!("failed to parse POM at {}", path.display()))
+    parse_pom_str(&content).with_context(|| format!("failed to parse POM at {}", path.display()))
 }
 
 fn parse_pom_str(xml: &str) -> Result<Vec<TransitiveDep>> {

@@ -5,6 +5,7 @@ use crate::compiler;
 use crate::errors::JargoError;
 use crate::jar;
 use crate::manifest::JargoToml;
+use crate::resolver;
 
 pub fn exec() -> Result<()> {
     let cwd = env::current_dir()?;
@@ -18,14 +19,17 @@ pub fn exec() -> Result<()> {
     let manifest = JargoToml::from_file(&manifest_path)
         .map_err(|e| JargoError::ManifestParse(e.to_string()))?;
 
+    // Resolve dependencies (uses lock file if present, else resolves + writes lock)
+    let resolved = resolver::resolve(&cwd, &manifest)?;
+
     // Print Cargo-style compilation status
     println!(
         "   Compiling {} v{} (java {})",
         manifest.package.name, manifest.package.version, manifest.package.java
     );
 
-    // Compile
-    let compile_output = compiler::compile(&cwd, &manifest)?;
+    // Compile with dependency classpath
+    let compile_output = compiler::compile(&cwd, &manifest, &resolved.compile_jars)?;
 
     if !compile_output.success {
         for error in compile_output.errors {

@@ -8,6 +8,7 @@ mod jar;
 mod lockfile;
 mod manifest;
 mod pom;
+mod resolver;
 mod staging;
 
 use anyhow::Result;

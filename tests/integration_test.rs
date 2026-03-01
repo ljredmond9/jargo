@@ -291,6 +291,103 @@ fn test_run_with_jvm_args() {
     assert!(stdout.contains("Hello, World!"));
 }
 
+/// Verifies end-to-end dependency resolution against Maven Central.
+/// Requires network access. Run with:
+///   cargo test -- --include-ignored
+#[test]
+#[ignore]
+fn test_build_with_dependency() {
+    let temp = TempDir::new().unwrap();
+    let project_path = temp.path().join("dep-test");
+
+    // Create project
+    let output = Command::new(jargo_bin())
+        .args(&["new", "dep-test"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "jargo new failed");
+
+    // Add commons-lang3 to Jargo.toml
+    let manifest_path = project_path.join("Jargo.toml");
+    let content = std::fs::read_to_string(&manifest_path).unwrap();
+    let content = format!(
+        "{}\n[dependencies]\n\"org.apache.commons:commons-lang3\" = \"3.14.0\"\n",
+        content
+    );
+    std::fs::write(&manifest_path, content).unwrap();
+
+    // Update Main.java to use commons-lang3 (base-package = "deptest")
+    let main_java = concat!(
+        "package deptest;\n",
+        "\n",
+        "import org.apache.commons.lang3.StringUtils;\n",
+        "\n",
+        "public class Main {\n",
+        "    public static void main(String[] args) {\n",
+        "        System.out.println(StringUtils.capitalize(\"hello\"));\n",
+        "    }\n",
+        "}\n"
+    );
+    std::fs::write(project_path.join("src/Main.java"), main_java).unwrap();
+
+    // First build: should resolve from Maven Central and write Jargo.lock
+    let output = Command::new(jargo_bin())
+        .arg("build")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "first jargo build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Resolving"),
+        "expected resolution message, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Locking"),
+        "expected lock message, got: {stdout}"
+    );
+
+    // Jargo.lock must exist and reference commons-lang3 as a compile dep
+    let lock_path = project_path.join("Jargo.lock");
+    assert!(lock_path.exists(), "Jargo.lock was not created");
+
+    let lock_content = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        lock_content.contains("commons-lang3"),
+        "lock file missing commons-lang3 entry"
+    );
+    assert!(
+        lock_content.contains("scope = \"compile\""),
+        "lock file missing compile scope"
+    );
+
+    // Second build: must use lock file — no "Resolving" message
+    let output = Command::new(jargo_bin())
+        .arg("build")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "second jargo build failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Resolving"),
+        "second build should not re-resolve; got: {stdout}"
+    );
+}
+
 #[test]
 fn test_manifest_not_found_error() {
     let temp = TempDir::new().unwrap();
