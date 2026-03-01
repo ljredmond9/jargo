@@ -5,16 +5,11 @@ use std::fs;
 use std::path::Path;
 
 /// Dependency scope: determines which classpaths a dep appears on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Scope {
+    #[default]
     Compile,
     Runtime,
-}
-
-impl Default for Scope {
-    fn default() -> Self {
-        Scope::Compile
-    }
 }
 
 /// A dependency after normalization (parsed from either simple or expanded form).
@@ -25,6 +20,7 @@ pub struct Dependency {
     pub version: String,
     pub scope: Scope,
     /// Only meaningful for lib projects. When true, consumers get this dep on their compile classpath.
+    #[allow(dead_code)] // used when lib `expose` semantics are implemented
     pub expose: bool,
 }
 
@@ -168,6 +164,7 @@ impl JargoToml {
     }
 
     /// Parse and return the [dev-dependencies] section as a normalized, sorted list.
+    #[allow(dead_code)] // used by the test runner (not yet implemented)
     pub fn get_dev_dependencies(&self) -> Result<Vec<Dependency>> {
         parse_dependency_map(&self.dev_dependencies)
     }

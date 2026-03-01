@@ -321,7 +321,7 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn version_segments(v: &str) -> Vec<String> {
-    v.split(|c: char| c == '.' || c == '-')
+    v.split(['.', '-'])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()

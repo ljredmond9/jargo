@@ -30,10 +30,6 @@ pub struct LockFile {
 }
 
 impl LockFile {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Read and parse a Jargo.lock file.
     pub fn read(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -58,7 +54,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("Jargo.lock");
 
-        let lock = LockFile::new();
+        let lock = LockFile::default();
         lock.write(&path).unwrap();
 
         let loaded = LockFile::read(&path).unwrap();

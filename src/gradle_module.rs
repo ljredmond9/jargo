@@ -82,7 +82,7 @@ pub fn parse_module(path: &Path) -> Result<Vec<TransitiveDep>> {
                 group: dep.group.clone(),
                 artifact: dep.module.clone(),
                 version,
-                scope: scope.clone(),
+                scope,
             });
         }
     }
