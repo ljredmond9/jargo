@@ -1,16 +1,5 @@
-mod cache;
 mod cli;
 mod commands;
-mod compiler;
-mod errors;
-mod gradle_module;
-mod jar;
-mod lockfile;
-mod manifest;
-mod output;
-mod pom;
-mod resolver;
-mod staging;
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,7 +8,7 @@ use cli::{Cli, Command};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    output::set_verbose(cli.verbose);
+    jargo_core::output::set_verbose(cli.verbose);
 
     match cli.command {
         Command::New { name, lib } => commands::new::exec(&name, lib),

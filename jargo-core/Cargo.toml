@@ -1,0 +1,18 @@
+[package]
+name = "jargo-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+zip = "2.2"
+reqwest = { version = "0.12", features = ["blocking"] }
+sha2 = "0.10"
+quick-xml = "0.37"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

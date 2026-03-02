@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:."]
+members = ["cargo:jargo"]
 
 # Config for 'dist'
 [dist]

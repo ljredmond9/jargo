@@ -1,0 +1,13 @@
+[package]
+name = "jargo"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/ljredmond9/jargo"
+
+[dependencies]
+jargo-core = { path = "../jargo-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

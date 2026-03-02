@@ -1,25 +1,7 @@
-[package]
-name = "jargo"
-version = "0.1.0"
-edition = "2021"
-repository = "https://github.com/ljredmond9/jargo"
+[workspace]
+members = ["jargo-core", "jargo", "jargo-bsp"]
+resolver = "2"
 
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-thiserror = "2"
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
-zip = "2.2"
-reqwest = { version = "0.12", features = ["blocking"] }
-sha2 = "0.10"
-quick-xml = "0.37"
-serde_json = "1"
-
-[dev-dependencies]
-tempfile = "3"
-
-# The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"

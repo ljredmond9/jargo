@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::commands::new::{scaffold, validate_name};
-use crate::errors::JargoError;
+use jargo_core::errors::JargoError;
 
 /// Execute `jargo init`.
 pub fn exec(is_lib: bool) -> Result<()> {

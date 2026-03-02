@@ -4,8 +4,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::errors::JargoError;
-use crate::manifest::{self, JargoToml};
+use jargo_core::errors::JargoError;
+use jargo_core::manifest::{self, JargoToml};
 
 /// Validate a project name: must be non-empty, start with a letter,
 /// and contain only ASCII lowercase letters, digits, and hyphens.

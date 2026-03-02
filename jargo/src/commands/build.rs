@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::env;
 
-use crate::compiler;
-use crate::errors::JargoError;
-use crate::jar;
-use crate::manifest::JargoToml;
-use crate::resolver;
+use jargo_core::compiler;
+use jargo_core::errors::JargoError;
+use jargo_core::jar;
+use jargo_core::manifest::JargoToml;
+use jargo_core::resolver;
 
 pub fn exec() -> Result<()> {
     let cwd = env::current_dir()?;

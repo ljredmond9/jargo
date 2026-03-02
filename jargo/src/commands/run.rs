@@ -2,10 +2,10 @@ use anyhow::Result;
 use std::env;
 use std::process::Command;
 
-use crate::compiler;
-use crate::errors::JargoError;
-use crate::manifest::JargoToml;
-use crate::resolver;
+use jargo_core::compiler;
+use jargo_core::errors::JargoError;
+use jargo_core::manifest::JargoToml;
+use jargo_core::resolver;
 
 pub fn exec(args: Vec<String>) -> Result<()> {
     let cwd = env::current_dir()?;
