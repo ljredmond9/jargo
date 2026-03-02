@@ -5,10 +5,15 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+use crate::context::GlobalContext;
 use crate::manifest::JargoToml;
 
 /// Assemble JAR file from compiled classes and resources.
-pub fn assemble_jar(project_root: &Path, manifest: &JargoToml) -> Result<PathBuf> {
+pub fn assemble_jar(
+    _gctx: &GlobalContext,
+    project_root: &Path,
+    manifest: &JargoToml,
+) -> Result<PathBuf> {
     let jar_name = format!("{}.jar", manifest.package.name);
     let jar_path = project_root.join("target").join(&jar_name);
 

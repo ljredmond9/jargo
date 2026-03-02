@@ -1,10 +1,10 @@
 use anyhow::Result;
-use std::env;
 use std::fs;
 
-pub fn exec() -> Result<()> {
-    let cwd = env::current_dir()?;
-    let target = cwd.join("target");
+use jargo_core::context::GlobalContext;
+
+pub fn exec(gctx: &GlobalContext) -> Result<()> {
+    let target = gctx.cwd.join("target");
 
     if target.exists() {
         fs::remove_dir_all(&target)?;

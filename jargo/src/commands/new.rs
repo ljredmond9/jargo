@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use jargo_core::context::GlobalContext;
 use jargo_core::errors::JargoError;
 use jargo_core::manifest::{self, JargoToml};
 
@@ -46,7 +47,7 @@ pub fn validate_name(name: &str) -> Result<(), JargoError> {
 }
 
 /// Execute `jargo new <name>`.
-pub fn exec(name: &str, is_lib: bool) -> Result<()> {
+pub fn exec(_gctx: &GlobalContext, name: &str, is_lib: bool) -> Result<()> {
     validate_name(name)?;
 
     let path = Path::new(name);

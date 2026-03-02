@@ -8,13 +8,13 @@ use cli::{Cli, Command};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    jargo_core::output::set_verbose(cli.verbose);
+    let gctx = jargo_core::context::GlobalContext::new(cli.verbose)?;
 
     match cli.command {
-        Command::New { name, lib } => commands::new::exec(&name, lib),
-        Command::Init { lib } => commands::init::exec(lib),
-        Command::Build => commands::build::exec(),
-        Command::Run { args } => commands::run::exec(args),
+        Command::New { name, lib } => commands::new::exec(&gctx, &name, lib),
+        Command::Init { lib } => commands::init::exec(&gctx, lib),
+        Command::Build => commands::build::exec(&gctx),
+        Command::Run { args } => commands::run::exec(&gctx, args),
         Command::Test => {
             eprintln!("error: `test` is not yet implemented");
             std::process::exit(1);
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
             eprintln!("error: `check` is not yet implemented");
             std::process::exit(1);
         }
-        Command::Clean => commands::clean::exec(),
+        Command::Clean => commands::clean::exec(&gctx),
         Command::Add { .. } => {
             eprintln!("error: `add` is not yet implemented");
             std::process::exit(1);

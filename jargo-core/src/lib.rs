@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod compiler;
+pub mod context;
 pub mod errors;
 pub mod gradle_module;
 pub mod jar;
