@@ -465,8 +465,7 @@ fn substitute_props(s: &str, props: &HashMap<String, String>) -> String {
                     let key = result[start + 2..end].to_string();
                     match props.get(&key) {
                         Some(val) => {
-                            result =
-                                format!("{}{}{}", &result[..start], val, &result[end + 1..]);
+                            result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
                         }
                         None => break, // unknown property — leave as-is
                     }
