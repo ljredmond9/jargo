@@ -84,6 +84,39 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     .into())
 }
 
+/// Fetch the POM file for an artifact, always returning XML (never `.module`).
+///
+/// Used for parent POM chain resolution: we always need the POM's XML even if
+/// a `.module` file exists for the same artifact.
+pub fn fetch_pom(group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
+    let dir = artifact_dir(group, artifact, version)?;
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create cache dir {}", dir.display()))?;
+
+    let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
+    if pom_path.exists() {
+        vprintln!(
+            "  [verbose]   cache hit (.pom for parent): {}",
+            pom_path.display()
+        );
+        return Ok(pom_path);
+    }
+
+    let client = http_client()?;
+    let pom_url = maven_central_url(group, artifact, version, "pom");
+    vprintln!("  [verbose]   downloading parent .pom: {}", pom_url);
+    if try_download(&client, &pom_url, &pom_path)? {
+        return Ok(pom_path);
+    }
+
+    Err(JargoError::DependencyNotFound(
+        group.to_string(),
+        artifact.to_string(),
+        version.to_string(),
+    )
+    .into())
+}
+
 /// Fetch the JAR for an artifact.
 ///
 /// Returns `(path_to_jar, sha256_hex)`. The sha256 is read from a companion
