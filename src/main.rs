@@ -7,6 +7,7 @@ mod gradle_module;
 mod jar;
 mod lockfile;
 mod manifest;
+mod output;
 mod pom;
 mod resolver;
 mod staging;
@@ -18,6 +19,7 @@ use cli::{Cli, Command};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    output::set_verbose(cli.verbose);
 
     match cli.command {
         Command::New { name, lib } => commands::new::exec(&name, lib),

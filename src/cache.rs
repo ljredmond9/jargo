@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::errors::JargoError;
+use crate::vprintln;
 
 /// Whether a fetched metadata file is a Gradle `.module` (JSON) or Maven `.pom` (XML).
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,10 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     // Check for cached .module
     let module_path = dir.join(artifact_filename(artifact, version, "module"));
     if module_path.exists() {
+        vprintln!(
+            "  [verbose]   cache hit (.module): {}",
+            module_path.display()
+        );
         return Ok(FetchedMetadata {
             path: module_path,
             format: MetadataFormat::Module,
@@ -39,6 +44,7 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     // Check for cached .pom
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
+        vprintln!("  [verbose]   cache hit (.pom): {}", pom_path.display());
         return Ok(FetchedMetadata {
             path: pom_path,
             format: MetadataFormat::Pom,
@@ -50,6 +56,7 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
 
     // Try .module first
     let module_url = maven_central_url(group, artifact, version, "module");
+    vprintln!("  [verbose]   downloading .module: {}", module_url);
     if try_download(&client, &module_url, &module_path)? {
         println!("  Fetching  {}:{}:{} (.module)", group, artifact, version);
         return Ok(FetchedMetadata {
@@ -60,6 +67,7 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
 
     // Fall back to .pom
     let pom_url = maven_central_url(group, artifact, version, "pom");
+    vprintln!("  [verbose]   .module not found, trying .pom: {}", pom_url);
     println!("  Fetching  {}:{}:{}", group, artifact, version);
     if try_download(&client, &pom_url, &pom_path)? {
         return Ok(FetchedMetadata {
@@ -90,6 +98,7 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
     let sha_path = dir.join(artifact_filename(artifact, version, "jar.sha256"));
 
     if jar_path.exists() && sha_path.exists() {
+        vprintln!("  [verbose]   cache hit (.jar): {}", jar_path.display());
         let sha256 = fs::read_to_string(&sha_path)
             .with_context(|| format!("failed to read {}", sha_path.display()))?
             .trim()
@@ -99,6 +108,7 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
 
     // Download the JAR
     let url = maven_central_url(group, artifact, version, "jar");
+    vprintln!("  [verbose]   downloading .jar: {}", url);
     println!("  Fetching  {}:{}:{} (jar)", group, artifact, version);
 
     let client = http_client()?;

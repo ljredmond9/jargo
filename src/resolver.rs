@@ -7,6 +7,7 @@ use crate::gradle_module;
 use crate::lockfile::{LockFile, LockedDependency};
 use crate::manifest::{Dependency, JargoToml, Scope};
 use crate::pom::{parse_pom, TransitiveDep, TransitiveScope};
+use crate::vprintln;
 
 /// The output of dependency resolution: classpath JAR lists and lock file entries.
 pub struct ResolvedDeps {
@@ -40,12 +41,14 @@ pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps
     let direct_deps = manifest.get_dependencies()?;
 
     if direct_deps.is_empty() {
+        vprintln!("  [verbose] no dependencies declared");
         return Ok(ResolvedDeps::empty());
     }
 
     let lock_path = project_root.join("Jargo.lock");
 
     if lock_path.exists() {
+        vprintln!("  [verbose] using lock file: {}", lock_path.display());
         let lock = LockFile::read(&lock_path)?;
         resolve_from_lock(&lock)
     } else {
@@ -55,6 +58,7 @@ pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps
         let lock = LockFile {
             dependency: resolved.lock_entries.clone(),
         };
+        vprintln!("  [verbose] writing Jargo.lock");
         lock.write(&lock_path)
             .context("failed to write Jargo.lock")?;
         println!("     Locking dependencies");
@@ -68,10 +72,27 @@ pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps
 /// Build classpaths from an existing `Jargo.lock` without re-resolving.
 /// Fetches JARs from the local cache (downloading if absent).
 fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
+    vprintln!(
+        "  [verbose] lock file has {} entr{}",
+        lock.dependency.len(),
+        if lock.dependency.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        }
+    );
+
     let mut compile_jars = Vec::new();
     let mut runtime_jars = Vec::new();
 
     for entry in &lock.dependency {
+        vprintln!(
+            "  [verbose] fetching {}:{}:{} ({})",
+            entry.group,
+            entry.artifact,
+            entry.version,
+            entry.scope
+        );
         let (jar_path, _sha256) = cache::fetch_jar(&entry.group, &entry.artifact, &entry.version)
             .with_context(|| {
             format!(
@@ -91,6 +112,12 @@ fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
             }
         }
     }
+
+    vprintln!(
+        "  [verbose] classpath ready: {} compile JAR(s), {} runtime JAR(s)",
+        compile_jars.len(),
+        runtime_jars.len()
+    );
 
     Ok(ResolvedDeps {
         compile_jars,
@@ -146,6 +173,12 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
         fetched.insert(fetch_key);
 
         // Fetch POM or .module from Maven Central (cached after first download).
+        vprintln!(
+            "  [verbose] resolving metadata: {}:{}:{}",
+            group,
+            artifact,
+            version
+        );
         let metadata = cache::fetch_metadata(&group, &artifact, &version)
             .with_context(|| format!("failed to resolve {}:{}:{}", group, artifact, version))?;
 
@@ -156,6 +189,13 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
             MetadataFormat::Pom => parse_pom(&metadata.path)
                 .with_context(|| format!("failed to parse POM for {}:{}", group, artifact))?,
         };
+
+        vprintln!(
+            "  [verbose]   {} transitive dep(s) from {}:{}",
+            transitives.len(),
+            group,
+            artifact
+        );
 
         for trans in transitives {
             let child_scope = mediate_scope(scope, &trans.scope);
@@ -183,7 +223,18 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
     let mut runtime_jars = Vec::new();
     let mut lock_entries = Vec::new();
 
+    vprintln!(
+        "  [verbose] BFS complete: {} dep(s) resolved",
+        entries.len()
+    );
+
     for ((group, artifact), (version, scope)) in entries {
+        vprintln!(
+            "  [verbose] fetching JAR: {}:{}:{}",
+            group,
+            artifact,
+            version
+        );
         let (jar_path, sha256) =
             cache::fetch_jar(&group, &artifact, &version).with_context(|| {
                 format!("failed to fetch JAR for {}:{}:{}", group, artifact, version)
