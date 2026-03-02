@@ -6,7 +6,7 @@ use crate::cache::{self, MetadataFormat};
 use crate::gradle_module;
 use crate::lockfile::{LockFile, LockedDependency};
 use crate::manifest::{Dependency, JargoToml, Scope};
-use crate::pom::{parse_pom, TransitiveDep, TransitiveScope};
+use crate::pom::{ParsedPom, TransitiveDep, TransitiveScope};
 use crate::vprintln;
 
 /// The output of dependency resolution: classpath JAR lists and lock file entries.
@@ -205,7 +205,7 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
         let transitives: Vec<TransitiveDep> = match metadata.format {
             MetadataFormat::Module => gradle_module::parse_module(&metadata.path)
                 .with_context(|| format!("failed to parse .module for {}:{}", group, artifact))?,
-            MetadataFormat::Pom => parse_pom(&metadata.path)
+            MetadataFormat::Pom => pom_transitive_deps(&metadata.path)
                 .with_context(|| format!("failed to parse POM for {}:{}", group, artifact))?,
         };
 
@@ -283,6 +283,197 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
         runtime_jars,
         lock_entries,
     })
+}
+
+// --- Phase 2 POM resolution ---
+
+/// Resolve transitive dependencies from a POM file, applying Phase 2 features:
+/// parent chain resolution, `${property}` substitution, and `<dependencyManagement>`
+/// version lookup.
+fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<TransitiveDep>> {
+    let raw = crate::pom::parse_pom_raw(metadata_path)?;
+    let effective = build_effective_pom(&raw, 0)?;
+
+    let mut result = Vec::new();
+    for dep in &raw.direct_deps {
+        if dep.optional {
+            continue;
+        }
+
+        let g = substitute_props(&dep.group, &effective.props);
+        let a = substitute_props(&dep.artifact, &effective.props);
+
+        // Resolve version: use explicit (possibly ${...}) version, or look up in managed.
+        let raw_version = if dep.version.is_empty() {
+            effective
+                .managed
+                .get(&(g.clone(), a.clone()))
+                .map(|m| m.version.clone())
+                .unwrap_or_default()
+        } else {
+            dep.version.clone()
+        };
+        let v = substitute_props(&raw_version, &effective.props);
+
+        // Skip deps whose version is still unresolved.
+        if v.is_empty() || v.contains("${") {
+            continue;
+        }
+
+        // Resolve scope: use dep's explicit scope, or fall back to managed scope.
+        let raw_scope = if dep.scope.is_empty() {
+            effective
+                .managed
+                .get(&(g.clone(), a.clone()))
+                .map(|m| m.scope.clone())
+                .unwrap_or_default()
+        } else {
+            dep.scope.clone()
+        };
+        let scope = match raw_scope.as_str() {
+            "" | "compile" => TransitiveScope::Compile,
+            "runtime" => TransitiveScope::Runtime,
+            _ => continue, // test, provided, system
+        };
+
+        result.push(TransitiveDep {
+            group: g,
+            artifact: a,
+            version: v,
+            scope,
+        });
+    }
+
+    Ok(result)
+}
+
+/// The merged result of walking a POM's parent chain.
+struct EffectivePom {
+    group: String,
+    version: String,
+    props: HashMap<String, String>,
+    managed: HashMap<(String, String), crate::pom::ManagedEntry>,
+}
+
+/// Follow the parent POM chain and build the merged (effective) properties and
+/// `<dependencyManagement>` map for the given POM.
+///
+/// Child properties and managed entries override those inherited from parents.
+fn build_effective_pom(pom: &ParsedPom, depth: u8) -> Result<EffectivePom> {
+    const MAX_DEPTH: u8 = 10;
+    if depth > MAX_DEPTH {
+        anyhow::bail!(
+            "parent POM chain depth exceeded {} levels (possible cycle)",
+            MAX_DEPTH
+        );
+    }
+
+    // Recurse into parent if present, starting with empty base values.
+    let mut parent_group = String::new();
+    let mut parent_version = String::new();
+    let mut merged_props: HashMap<String, String> = HashMap::new();
+    let mut merged_managed: HashMap<(String, String), crate::pom::ManagedEntry> = HashMap::new();
+
+    if let Some(parent_ref) = &pom.parent {
+        if !parent_ref.version.is_empty() {
+            vprintln!(
+                "  [verbose]   resolving parent POM {}:{}:{}",
+                parent_ref.group,
+                parent_ref.artifact,
+                parent_ref.version
+            );
+            let parent_path =
+                cache::fetch_pom(&parent_ref.group, &parent_ref.artifact, &parent_ref.version)
+                    .with_context(|| {
+                        format!(
+                            "failed to fetch parent POM {}:{}:{}",
+                            parent_ref.group, parent_ref.artifact, parent_ref.version
+                        )
+                    })?;
+            let parent_pom = crate::pom::parse_pom_raw(&parent_path).with_context(|| {
+                format!(
+                    "failed to parse parent POM {}:{}:{}",
+                    parent_ref.group, parent_ref.artifact, parent_ref.version
+                )
+            })?;
+            let parent = build_effective_pom(&parent_pom, depth + 1)?;
+            parent_group = parent.group;
+            parent_version = parent.version;
+            merged_props = parent.props;
+            merged_managed = parent.managed;
+        }
+    }
+
+    // Effective coordinates: child overrides parent.
+    let effective_group = if pom.group.is_empty() {
+        parent_group
+    } else {
+        pom.group.clone()
+    };
+    let effective_version = if pom.version.is_empty() {
+        parent_version
+    } else {
+        pom.version.clone()
+    };
+
+    // Merge properties: child overrides parent.
+    for (k, v) in &pom.properties {
+        merged_props.insert(k.clone(), v.clone());
+    }
+
+    // Resolve the effective version (may reference properties like ${revision}).
+    let resolved_version = substitute_props(&effective_version, &merged_props);
+
+    // Add built-in project.* properties after substitution.
+    merged_props.insert("project.groupId".to_string(), effective_group.clone());
+    merged_props.insert("project.artifactId".to_string(), pom.artifact.clone());
+    merged_props.insert("project.version".to_string(), resolved_version.clone());
+    if let Some(parent_ref) = &pom.parent {
+        merged_props.insert(
+            "project.parent.version".to_string(),
+            parent_ref.version.clone(),
+        );
+    }
+
+    // Merge managed deps: child overrides parent.
+    for (k, v) in &pom.managed {
+        merged_managed.insert(k.clone(), v.clone());
+    }
+
+    Ok(EffectivePom {
+        group: effective_group,
+        version: resolved_version,
+        props: merged_props,
+        managed: merged_managed,
+    })
+}
+
+/// Replace all `${key}` placeholders in `s` with values from `props`.
+///
+/// Applies substitution in a loop to handle chained references (e.g., a property
+/// value that itself contains `${other}`). Stops after 20 iterations to guard
+/// against circular references.
+fn substitute_props(s: &str, props: &HashMap<String, String>) -> String {
+    let mut result = s.to_string();
+    for _ in 0..20 {
+        match result.find("${") {
+            None => break,
+            Some(start) => match result[start..].find('}') {
+                None => break,
+                Some(end_rel) => {
+                    let end = start + end_rel;
+                    let key = result[start + 2..end].to_string();
+                    match props.get(&key) {
+                        Some(val) => {
+                            result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
+                        }
+                        None => break, // unknown property — leave as-is
+                    }
+                }
+            },
+        }
+    }
+    result
 }
 
 // --- Helpers ---
@@ -630,5 +821,195 @@ mod tests {
             dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
         };
         assert!(lock_is_fresh(&[], &lock));
+    }
+
+    // --- substitute_props ---
+
+    #[test]
+    fn test_substitute_props_simple() {
+        let mut props = HashMap::new();
+        props.insert("foo.version".to_string(), "1.2.3".to_string());
+        assert_eq!(substitute_props("${foo.version}", &props), "1.2.3");
+        assert_eq!(
+            substitute_props("prefix-${foo.version}-suffix", &props),
+            "prefix-1.2.3-suffix"
+        );
+    }
+
+    #[test]
+    fn test_substitute_props_no_placeholder() {
+        let props = HashMap::new();
+        assert_eq!(substitute_props("1.0.0", &props), "1.0.0");
+        assert_eq!(substitute_props("", &props), "");
+    }
+
+    #[test]
+    fn test_substitute_props_unknown_property() {
+        let props = HashMap::new();
+        // Unknown property — left as-is
+        assert_eq!(substitute_props("${unknown}", &props), "${unknown}");
+    }
+
+    #[test]
+    fn test_substitute_props_chained() {
+        let mut props = HashMap::new();
+        // a references b, b has a concrete value
+        props.insert("a".to_string(), "${b}".to_string());
+        props.insert("b".to_string(), "final".to_string());
+        assert_eq!(substitute_props("${a}", &props), "final");
+    }
+
+    #[test]
+    fn test_substitute_props_project_version() {
+        let mut props = HashMap::new();
+        props.insert("project.version".to_string(), "3.0.0".to_string());
+        assert_eq!(substitute_props("${project.version}", &props), "3.0.0");
+    }
+
+    #[test]
+    fn test_substitute_props_multiple_in_one_string() {
+        let mut props = HashMap::new();
+        props.insert("g".to_string(), "com.example".to_string());
+        props.insert("v".to_string(), "1.0".to_string());
+        // Only one placeholder is replaced per iteration, but the loop handles both
+        assert_eq!(
+            substitute_props("${g}:lib:${v}", &props),
+            "com.example:lib:1.0"
+        );
+    }
+
+    // --- pom_transitive_deps (unit tests using temp files, no network) ---
+
+    #[test]
+    fn test_pom_transitive_deps_with_property_version() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let pom_path = dir.path().join("test.pom");
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>parent-style</artifactId>
+  <version>2.0.0</version>
+  <properties>
+    <dep.version>1.5.0</dep.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>${dep.version}</version>
+    </dependency>
+  </dependencies>
+</project>"#;
+        fs::write(&pom_path, xml).unwrap();
+        let deps = pom_transitive_deps(&pom_path).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].artifact, "commons-lang3");
+        assert_eq!(deps[0].version, "1.5.0");
+    }
+
+    #[test]
+    fn test_pom_transitive_deps_managed_version_fills_in() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let pom_path = dir.path().join("test.pom");
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>bom-user</artifactId>
+  <version>1.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.example</groupId>
+        <artifactId>foo</artifactId>
+        <version>3.2.1</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.example</groupId>
+      <artifactId>foo</artifactId>
+    </dependency>
+  </dependencies>
+</project>"#;
+        fs::write(&pom_path, xml).unwrap();
+        let deps = pom_transitive_deps(&pom_path).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].group, "org.example");
+        assert_eq!(deps[0].artifact, "foo");
+        assert_eq!(deps[0].version, "3.2.1");
+        assert_eq!(deps[0].scope, TransitiveScope::Compile);
+    }
+
+    #[test]
+    fn test_pom_transitive_deps_project_version_substitution() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let pom_path = dir.path().join("test.pom");
+        // A common pattern: BOM-style POM where managed versions reference ${project.version}
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>my-bom</artifactId>
+  <version>5.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>module-a</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>module-a</artifactId>
+    </dependency>
+  </dependencies>
+</project>"#;
+        fs::write(&pom_path, xml).unwrap();
+        let deps = pom_transitive_deps(&pom_path).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].version, "5.0.0");
+    }
+
+    #[test]
+    fn test_pom_transitive_deps_still_unversioned_skipped() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let pom_path = dir.path().join("test.pom");
+        // A dep with no version and no managed entry — should be skipped
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>test-pom</artifactId>
+  <version>1.0.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>no-version</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>has-version</artifactId>
+      <version>2.0.0</version>
+    </dependency>
+  </dependencies>
+</project>"#;
+        fs::write(&pom_path, xml).unwrap();
+        let deps = pom_transitive_deps(&pom_path).unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].artifact, "has-version");
     }
 }

@@ -404,3 +404,96 @@ fn test_manifest_not_found_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Jargo.toml not found"));
 }
+
+/// Phase 2: build a project that depends on jackson-databind, which uses parent POMs,
+/// `${project.version}` substitution, and `<dependencyManagement>` sections extensively.
+///
+/// Requires network access. Run with:
+///   cargo test -- --include-ignored
+#[test]
+#[ignore]
+fn test_build_with_parent_pom_dependency() {
+    let temp = TempDir::new().unwrap();
+    let project_path = temp.path().join("jackson-test");
+
+    // Create project
+    let output = Command::new(jargo_bin())
+        .args(&["new", "jackson-test"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "jargo new failed");
+
+    // Add jackson-databind to Jargo.toml
+    let manifest_path = project_path.join("Jargo.toml");
+    let content = std::fs::read_to_string(&manifest_path).unwrap();
+    let content = format!(
+        "{}\n[dependencies]\n\"com.fasterxml.jackson.core:jackson-databind\" = \"2.17.0\"\n",
+        content
+    );
+    std::fs::write(&manifest_path, content).unwrap();
+
+    // Update Main.java to use jackson-databind (base-package = "jacksontest")
+    let main_java = concat!(
+        "package jacksontest;\n",
+        "\n",
+        "import com.fasterxml.jackson.databind.ObjectMapper;\n",
+        "\n",
+        "public class Main {\n",
+        "    public static void main(String[] args) throws Exception {\n",
+        "        ObjectMapper mapper = new ObjectMapper();\n",
+        "        System.out.println(mapper.writeValueAsString(\"hello\"));\n",
+        "    }\n",
+        "}\n"
+    );
+    std::fs::write(project_path.join("src/Main.java"), main_java).unwrap();
+
+    // Build: should resolve jackson-databind and its transitive deps (jackson-core,
+    // jackson-annotations) via parent POM chain and dependencyManagement.
+    let output = Command::new(jargo_bin())
+        .arg("build")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "jargo build with jackson-databind failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Lock file should contain jackson-databind and its transitives
+    let lock_path = project_path.join("Jargo.lock");
+    assert!(lock_path.exists(), "Jargo.lock was not created");
+    let lock_content = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(
+        lock_content.contains("jackson-databind"),
+        "lock file missing jackson-databind"
+    );
+    assert!(
+        lock_content.contains("jackson-core"),
+        "lock file missing jackson-core (transitive from parent POM resolution)"
+    );
+    assert!(
+        lock_content.contains("jackson-annotations"),
+        "lock file missing jackson-annotations (transitive from parent POM resolution)"
+    );
+
+    // Run the project — should serialize "hello" to JSON
+    let output = Command::new(jargo_bin())
+        .arg("run")
+        .current_dir(&project_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "jargo run with jackson-databind failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"hello\""),
+        "expected JSON output, got: {stdout}"
+    );
+}
