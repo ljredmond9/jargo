@@ -25,6 +25,16 @@ struct GradleDep {
     group: String,
     module: String,
     version: Option<GradleVersion>,
+    #[serde(default)]
+    attributes: GradleDepAttributes,
+}
+
+/// Dependency-level attributes that affect how the dep is interpreted.
+#[derive(Deserialize, Default)]
+struct GradleDepAttributes {
+    /// `"platform"` marks a BOM import — version constraints only, no JAR.
+    #[serde(rename = "org.gradle.category", default)]
+    category: String,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +80,13 @@ pub fn parse_module(path: &Path) -> Result<Vec<TransitiveDep>> {
         };
 
         for dep in &variant.dependencies {
+            // Platform deps (BOMs) contribute version constraints only — no JAR.
+            // Their influence is already baked into the explicit versions listed
+            // in this same .module file, so we don't need to resolve them further.
+            if dep.attributes.category == "platform" {
+                continue;
+            }
+
             let version = match &dep.version {
                 Some(v) => match v.resolve() {
                     Some(ver) => ver,
@@ -307,5 +324,36 @@ mod tests {
         let json = r#"{ "formatVersion": "1.1", "variants": [] }"#;
         let deps = parse(json);
         assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_skips_platform_bom_dependency() {
+        // Platform deps (e.g. jackson-bom) are BOM imports — version constraints
+        // only, no JAR. They should not appear in the resolved dep list.
+        let json = r#"{
+            "formatVersion": "1.1",
+            "variants": [
+                {
+                    "name": "apiElements",
+                    "dependencies": [
+                        {
+                            "group": "com.fasterxml.jackson",
+                            "module": "jackson-bom",
+                            "version": { "requires": "2.17.0" },
+                            "attributes": { "org.gradle.category": "platform" },
+                            "endorseStrictVersions": true
+                        },
+                        {
+                            "group": "com.fasterxml.jackson.core",
+                            "module": "jackson-core",
+                            "version": { "requires": "2.17.0" }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let deps = parse(json);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].artifact, "jackson-core");
     }
 }
