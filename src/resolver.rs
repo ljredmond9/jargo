@@ -48,23 +48,42 @@ pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps
     let lock_path = project_root.join("Jargo.lock");
 
     if lock_path.exists() {
-        vprintln!("  [verbose] using lock file: {}", lock_path.display());
         let lock = LockFile::read(&lock_path)?;
-        resolve_from_lock(&lock)
-    } else {
-        println!("  Resolving dependencies...");
-        let resolved = resolve_fresh(&direct_deps)?;
-
-        let lock = LockFile {
-            dependency: resolved.lock_entries.clone(),
-        };
-        vprintln!("  [verbose] writing Jargo.lock");
-        lock.write(&lock_path)
-            .context("failed to write Jargo.lock")?;
-        println!("     Locking dependencies");
-
-        Ok(resolved)
+        if lock_is_fresh(&direct_deps, &lock) {
+            vprintln!(
+                "  [verbose] lock file is up to date: {}",
+                lock_path.display()
+            );
+            return resolve_from_lock(&lock);
+        }
+        vprintln!("  [verbose] lock file is out of date, re-resolving");
     }
+
+    println!("  Resolving dependencies...");
+    let resolved = resolve_fresh(&direct_deps)?;
+
+    let lock = LockFile {
+        dependency: resolved.lock_entries.clone(),
+    };
+    vprintln!("  [verbose] writing Jargo.lock");
+    lock.write(&lock_path)
+        .context("failed to write Jargo.lock")?;
+    println!("     Locking dependencies");
+
+    Ok(resolved)
+}
+
+/// Returns true when every direct dep in the manifest has an entry in the lock
+/// file with the exact same version. If any dep is missing or has changed
+/// version, the lock is considered stale and must be regenerated.
+fn lock_is_fresh(direct_deps: &[Dependency], lock: &LockFile) -> bool {
+    direct_deps.iter().all(|dep| {
+        lock.dependency.iter().any(|entry| {
+            entry.group == dep.group
+                && entry.artifact == dep.artifact
+                && entry.version == dep.version
+        })
+    })
 }
 
 // --- Lock-file path ---
@@ -538,5 +557,78 @@ mod tests {
         );
         assert!(!needs_fetch); // version didn't change, no re-fetch needed
         assert_eq!(resolved[&key].1, TransitiveScope::Compile); // scope upgraded
+    }
+
+    // --- lock_is_fresh ---
+
+    fn make_dep(group: &str, artifact: &str, version: &str) -> Dependency {
+        Dependency {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            scope: Scope::Compile,
+            expose: false,
+        }
+    }
+
+    fn make_lock_entry(group: &str, artifact: &str, version: &str) -> LockedDependency {
+        LockedDependency {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            scope: "compile".to_string(),
+            sha256: "abc123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_lock_is_fresh_all_match() {
+        let deps = vec![make_dep("com.example", "foo", "1.0.0")];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_dep_missing_from_lock() {
+        let deps = vec![
+            make_dep("com.example", "foo", "1.0.0"),
+            make_dep("com.example", "bar", "2.0.0"),
+        ];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(!lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_version_changed() {
+        let deps = vec![make_dep("com.example", "foo", "2.0.0")];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(!lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_extra_transitive_in_lock_is_ok() {
+        // Lock may have transitive deps not in the manifest — that's fine.
+        let deps = vec![make_dep("com.example", "foo", "1.0.0")];
+        let lock = LockFile {
+            dependency: vec![
+                make_lock_entry("com.example", "foo", "1.0.0"),
+                make_lock_entry("org.other", "transitive", "3.0.0"),
+            ],
+        };
+        assert!(lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_empty_deps() {
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(lock_is_fresh(&[], &lock));
     }
 }
