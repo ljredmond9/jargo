@@ -292,7 +292,7 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
 /// version lookup.
 fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<TransitiveDep>> {
     let raw = crate::pom::parse_pom_raw(metadata_path)?;
-    let (_, _, props, managed) = build_effective_pom(&raw, 0)?;
+    let effective = build_effective_pom(&raw, 0)?;
 
     let mut result = Vec::new();
     for dep in &raw.direct_deps {
@@ -300,19 +300,20 @@ fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<Transitive
             continue;
         }
 
-        let g = substitute_props(&dep.group, &props);
-        let a = substitute_props(&dep.artifact, &props);
+        let g = substitute_props(&dep.group, &effective.props);
+        let a = substitute_props(&dep.artifact, &effective.props);
 
         // Resolve version: use explicit (possibly ${...}) version, or look up in managed.
         let raw_version = if dep.version.is_empty() {
-            managed
+            effective
+                .managed
                 .get(&(g.clone(), a.clone()))
                 .map(|m| m.version.clone())
                 .unwrap_or_default()
         } else {
             dep.version.clone()
         };
-        let v = substitute_props(&raw_version, &props);
+        let v = substitute_props(&raw_version, &effective.props);
 
         // Skip deps whose version is still unresolved.
         if v.is_empty() || v.contains("${") {
@@ -321,7 +322,8 @@ fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<Transitive
 
         // Resolve scope: use dep's explicit scope, or fall back to managed scope.
         let raw_scope = if dep.scope.is_empty() {
-            managed
+            effective
+                .managed
                 .get(&(g.clone(), a.clone()))
                 .map(|m| m.scope.clone())
                 .unwrap_or_default()
@@ -345,20 +347,19 @@ fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<Transitive
     Ok(result)
 }
 
+/// The merged result of walking a POM's parent chain.
+struct EffectivePom {
+    group: String,
+    version: String,
+    props: HashMap<String, String>,
+    managed: HashMap<(String, String), crate::pom::ManagedEntry>,
+}
+
 /// Follow the parent POM chain and build the merged (effective) properties and
 /// `<dependencyManagement>` map for the given POM.
 ///
-/// Returns `(effective_group, effective_version, merged_props, merged_managed)`.
 /// Child properties and managed entries override those inherited from parents.
-fn build_effective_pom(
-    pom: &ParsedPom,
-    depth: u8,
-) -> Result<(
-    String,
-    String,
-    HashMap<String, String>,
-    HashMap<(String, String), crate::pom::ManagedEntry>,
-)> {
+fn build_effective_pom(pom: &ParsedPom, depth: u8) -> Result<EffectivePom> {
     const MAX_DEPTH: u8 = 10;
     if depth > MAX_DEPTH {
         anyhow::bail!(
@@ -367,49 +368,41 @@ fn build_effective_pom(
         );
     }
 
-    // Recurse into parent if present.
-    let (parent_group, parent_version, mut merged_props, mut merged_managed) =
-        if let Some(parent_ref) = &pom.parent {
-            if !parent_ref.version.is_empty() {
-                vprintln!(
-                    "  [verbose]   resolving parent POM {}:{}:{}",
-                    parent_ref.group,
-                    parent_ref.artifact,
-                    parent_ref.version
-                );
-                let parent_path =
-                    cache::fetch_pom(&parent_ref.group, &parent_ref.artifact, &parent_ref.version)
-                        .with_context(|| {
-                            format!(
-                                "failed to fetch parent POM {}:{}:{}",
-                                parent_ref.group, parent_ref.artifact, parent_ref.version
-                            )
-                        })?;
-                let parent_pom =
-                    crate::pom::parse_pom_raw(&parent_path).with_context(|| {
+    // Recurse into parent if present, starting with empty base values.
+    let mut parent_group = String::new();
+    let mut parent_version = String::new();
+    let mut merged_props: HashMap<String, String> = HashMap::new();
+    let mut merged_managed: HashMap<(String, String), crate::pom::ManagedEntry> = HashMap::new();
+
+    if let Some(parent_ref) = &pom.parent {
+        if !parent_ref.version.is_empty() {
+            vprintln!(
+                "  [verbose]   resolving parent POM {}:{}:{}",
+                parent_ref.group,
+                parent_ref.artifact,
+                parent_ref.version
+            );
+            let parent_path =
+                cache::fetch_pom(&parent_ref.group, &parent_ref.artifact, &parent_ref.version)
+                    .with_context(|| {
                         format!(
-                            "failed to parse parent POM {}:{}:{}",
+                            "failed to fetch parent POM {}:{}:{}",
                             parent_ref.group, parent_ref.artifact, parent_ref.version
                         )
                     })?;
-                let (pg, pv, pp, pm) = build_effective_pom(&parent_pom, depth + 1)?;
-                (pg, pv, pp, pm)
-            } else {
-                (
-                    String::new(),
-                    String::new(),
-                    HashMap::new(),
-                    HashMap::new(),
+            let parent_pom = crate::pom::parse_pom_raw(&parent_path).with_context(|| {
+                format!(
+                    "failed to parse parent POM {}:{}:{}",
+                    parent_ref.group, parent_ref.artifact, parent_ref.version
                 )
-            }
-        } else {
-            (
-                String::new(),
-                String::new(),
-                HashMap::new(),
-                HashMap::new(),
-            )
-        };
+            })?;
+            let parent = build_effective_pom(&parent_pom, depth + 1)?;
+            parent_group = parent.group;
+            parent_version = parent.version;
+            merged_props = parent.props;
+            merged_managed = parent.managed;
+        }
+    }
 
     // Effective coordinates: child overrides parent.
     let effective_group = if pom.group.is_empty() {
@@ -447,7 +440,12 @@ fn build_effective_pom(
         merged_managed.insert(k.clone(), v.clone());
     }
 
-    Ok((effective_group, resolved_version, merged_props, merged_managed))
+    Ok(EffectivePom {
+        group: effective_group,
+        version: resolved_version,
+        props: merged_props,
+        managed: merged_managed,
+    })
 }
 
 /// Replace all `${key}` placeholders in `s` with values from `props`.
