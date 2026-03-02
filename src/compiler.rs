@@ -13,7 +13,13 @@ pub struct CompileOutput {
 }
 
 /// Compile the project at the given root directory.
-pub fn compile(project_root: &Path, manifest: &JargoToml) -> Result<CompileOutput> {
+///
+/// `classpath` is a list of dependency JAR paths placed on `-classpath` for `javac`.
+pub fn compile(
+    project_root: &Path,
+    manifest: &JargoToml,
+    classpath: &[PathBuf],
+) -> Result<CompileOutput> {
     let base_package = manifest.get_base_package();
 
     // 1. Create staging symlink
@@ -39,6 +45,7 @@ pub fn compile(project_root: &Path, manifest: &JargoToml) -> Result<CompileOutpu
         &src_root,
         &classes_dir,
         &manifest.package.java,
+        classpath,
         &source_files,
     )?;
 
@@ -105,6 +112,7 @@ fn write_javac_args(
     src_root: &Path,
     classes_dir: &Path,
     java_version: &str,
+    classpath: &[PathBuf],
     source_files: &[PathBuf],
 ) -> Result<()> {
     let mut args = format!(
@@ -113,6 +121,20 @@ fn write_javac_args(
         classes_dir.display(),
         src_root.display()
     );
+
+    if !classpath.is_empty() {
+        #[cfg(windows)]
+        let sep = ";";
+        #[cfg(not(windows))]
+        let sep = ":";
+
+        let cp = classpath
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(sep);
+        args.push_str(&format!("-classpath\n{}\n", cp));
+    }
 
     // Add all source files
     for file in source_files {

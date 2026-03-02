@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::compiler;
 use crate::errors::JargoError;
 use crate::manifest::JargoToml;
+use crate::resolver;
 
 pub fn exec(args: Vec<String>) -> Result<()> {
     let cwd = env::current_dir()?;
@@ -22,13 +23,16 @@ pub fn exec(args: Vec<String>) -> Result<()> {
         return Err(JargoError::NotAnApp.into());
     }
 
+    // Resolve dependencies (uses lock file if present, else resolves + writes lock)
+    let resolved = resolver::resolve(&cwd, &manifest)?;
+
     // Compile
     println!(
         "   Compiling {} v{} (java {})",
         manifest.package.name, manifest.package.version, manifest.package.java
     );
 
-    let compile_output = compiler::compile(&cwd, &manifest)?;
+    let compile_output = compiler::compile(&cwd, &manifest, &resolved.compile_jars)?;
 
     if !compile_output.success {
         for error in compile_output.errors {
@@ -37,9 +41,19 @@ pub fn exec(args: Vec<String>) -> Result<()> {
         return Err(JargoError::CompilationFailed.into());
     }
 
-    // Assemble the runtime classpath
+    // Assemble the runtime classpath: compiled classes + dependency JARs.
     let classes_dir = cwd.join("target/classes");
-    let classpath = classes_dir.to_string_lossy().to_string();
+
+    #[cfg(windows)]
+    let sep = ";";
+    #[cfg(not(windows))]
+    let sep = ":";
+
+    let mut cp_parts = vec![classes_dir.to_string_lossy().into_owned()];
+    for jar in &resolved.runtime_jars {
+        cp_parts.push(jar.to_string_lossy().into_owned());
+    }
+    let classpath = cp_parts.join(sep);
 
     // Build the fully-qualified main class name
     let base_package = manifest.get_base_package();

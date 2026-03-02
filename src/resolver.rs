@@ -1,0 +1,634 @@
+use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+
+use crate::cache::{self, MetadataFormat};
+use crate::gradle_module;
+use crate::lockfile::{LockFile, LockedDependency};
+use crate::manifest::{Dependency, JargoToml, Scope};
+use crate::pom::{parse_pom, TransitiveDep, TransitiveScope};
+use crate::vprintln;
+
+/// The output of dependency resolution: classpath JAR lists and lock file entries.
+pub struct ResolvedDeps {
+    /// JARs on the compile classpath (compile-scope deps only).
+    pub compile_jars: Vec<PathBuf>,
+    /// JARs on the runtime classpath (compile + runtime scope deps).
+    pub runtime_jars: Vec<PathBuf>,
+    /// Entries written to / read from Jargo.lock.
+    pub lock_entries: Vec<LockedDependency>,
+}
+
+impl ResolvedDeps {
+    fn empty() -> Self {
+        Self {
+            compile_jars: Vec::new(),
+            runtime_jars: Vec::new(),
+            lock_entries: Vec::new(),
+        }
+    }
+}
+
+/// Resolve dependencies for the project at `project_root`.
+///
+/// - If `Jargo.lock` exists: uses pinned versions from the lock file,
+///   fetches any JARs not yet in the local cache, and builds classpaths.
+/// - If `Jargo.lock` is absent: runs BFS resolution from Maven Central,
+///   writes a new `Jargo.lock`, and returns the resulting classpaths.
+///
+/// Returns empty classpaths immediately when there are no dependencies.
+pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps> {
+    let direct_deps = manifest.get_dependencies()?;
+
+    if direct_deps.is_empty() {
+        vprintln!("  [verbose] no dependencies declared");
+        return Ok(ResolvedDeps::empty());
+    }
+
+    let lock_path = project_root.join("Jargo.lock");
+
+    if lock_path.exists() {
+        let lock = LockFile::read(&lock_path)?;
+        if lock_is_fresh(&direct_deps, &lock) {
+            vprintln!(
+                "  [verbose] lock file is up to date: {}",
+                lock_path.display()
+            );
+            return resolve_from_lock(&lock);
+        }
+        vprintln!("  [verbose] lock file is out of date, re-resolving");
+    }
+
+    println!("  Resolving dependencies...");
+    let resolved = resolve_fresh(&direct_deps)?;
+
+    let lock = LockFile {
+        dependency: resolved.lock_entries.clone(),
+    };
+    vprintln!("  [verbose] writing Jargo.lock");
+    lock.write(&lock_path)
+        .context("failed to write Jargo.lock")?;
+    println!("     Locking dependencies");
+
+    Ok(resolved)
+}
+
+/// Returns true when every direct dep in the manifest has an entry in the lock
+/// file with the exact same version. If any dep is missing or has changed
+/// version, the lock is considered stale and must be regenerated.
+fn lock_is_fresh(direct_deps: &[Dependency], lock: &LockFile) -> bool {
+    direct_deps.iter().all(|dep| {
+        lock.dependency.iter().any(|entry| {
+            entry.group == dep.group
+                && entry.artifact == dep.artifact
+                && entry.version == dep.version
+        })
+    })
+}
+
+// --- Lock-file path ---
+
+/// Build classpaths from an existing `Jargo.lock` without re-resolving.
+/// Fetches JARs from the local cache (downloading if absent).
+fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
+    vprintln!(
+        "  [verbose] lock file has {} entr{}",
+        lock.dependency.len(),
+        if lock.dependency.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        }
+    );
+
+    let mut compile_jars = Vec::new();
+    let mut runtime_jars = Vec::new();
+
+    for entry in &lock.dependency {
+        vprintln!(
+            "  [verbose] fetching {}:{}:{} ({})",
+            entry.group,
+            entry.artifact,
+            entry.version,
+            entry.scope
+        );
+        let (jar_path, _sha256) = cache::fetch_jar(&entry.group, &entry.artifact, &entry.version)
+            .with_context(|| {
+            format!(
+                "failed to fetch JAR for {}:{}:{}",
+                entry.group, entry.artifact, entry.version
+            )
+        })?;
+
+        match entry.scope.as_str() {
+            "compile" => {
+                compile_jars.push(jar_path.clone());
+                runtime_jars.push(jar_path);
+            }
+            _ => {
+                // "runtime" or any unknown scope → runtime only
+                runtime_jars.push(jar_path);
+            }
+        }
+    }
+
+    vprintln!(
+        "  [verbose] classpath ready: {} compile JAR(s), {} runtime JAR(s)",
+        compile_jars.len(),
+        runtime_jars.len()
+    );
+
+    Ok(ResolvedDeps {
+        compile_jars,
+        runtime_jars,
+        lock_entries: lock.dependency.clone(),
+    })
+}
+
+// --- Fresh resolution ---
+
+/// Resolve dependencies from Maven Central via BFS.
+///
+/// Algorithm:
+/// 1. Seed the resolved map and work queue from `direct_deps`.
+/// 2. For each item in the queue, look up the *currently resolved* version
+///    (which may have been bumped higher by another path).
+/// 3. If that exact (group, artifact, version) has already had its metadata
+///    fetched, skip it (cycle / duplicate guard).
+/// 4. Fetch and parse the POM or Gradle module file.
+/// 5. For each transitive dep, apply scope mediation; if it's new or its
+///    version is higher, update the resolved map and enqueue for fetching.
+/// 6. After BFS, fetch all JARs and assemble classpaths and lock entries.
+fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
+    // (group, artifact) → (highest_version, effective_scope)
+    let mut resolved: HashMap<(String, String), (String, TransitiveScope)> = HashMap::new();
+    // Guards against fetching the same (group, artifact, version) twice.
+    let mut fetched: HashSet<(String, String, String)> = HashSet::new();
+    let mut queue: VecDeque<(String, String, String, TransitiveScope)> = VecDeque::new();
+
+    // Seed from direct dependencies.
+    for dep in direct_deps {
+        let scope = from_manifest_scope(&dep.scope);
+        let key = (dep.group.clone(), dep.artifact.clone());
+        update_resolved(&mut resolved, key, dep.version.clone(), scope);
+        queue.push_back((
+            dep.group.clone(),
+            dep.artifact.clone(),
+            dep.version.clone(),
+            scope,
+        ));
+    }
+
+    // BFS.
+    while let Some((group, artifact, _, _)) = queue.pop_front() {
+        let key = (group.clone(), artifact.clone());
+        let (version, scope) = resolved[&key].clone();
+
+        // Skip if we've already fetched metadata for this exact version.
+        let fetch_key = (group.clone(), artifact.clone(), version.clone());
+        if fetched.contains(&fetch_key) {
+            continue;
+        }
+        fetched.insert(fetch_key);
+
+        // Fetch POM or .module from Maven Central (cached after first download).
+        vprintln!(
+            "  [verbose] resolving metadata: {}:{}:{}",
+            group,
+            artifact,
+            version
+        );
+        let metadata = cache::fetch_metadata(&group, &artifact, &version)
+            .with_context(|| format!("failed to resolve {}:{}:{}", group, artifact, version))?;
+
+        // Parse transitive deps from whichever format was returned.
+        let transitives: Vec<TransitiveDep> = match metadata.format {
+            MetadataFormat::Module => gradle_module::parse_module(&metadata.path)
+                .with_context(|| format!("failed to parse .module for {}:{}", group, artifact))?,
+            MetadataFormat::Pom => parse_pom(&metadata.path)
+                .with_context(|| format!("failed to parse POM for {}:{}", group, artifact))?,
+        };
+
+        vprintln!(
+            "  [verbose]   {} transitive dep(s) from {}:{}",
+            transitives.len(),
+            group,
+            artifact
+        );
+
+        for trans in transitives {
+            let child_scope = mediate_scope(scope, &trans.scope);
+
+            let trans_key = (trans.group.clone(), trans.artifact.clone());
+            let needs_fetch =
+                update_resolved(&mut resolved, trans_key, trans.version.clone(), child_scope);
+
+            if needs_fetch {
+                queue.push_back((
+                    trans.group.clone(),
+                    trans.artifact.clone(),
+                    trans.version.clone(),
+                    child_scope,
+                ));
+            }
+        }
+    }
+
+    // Collect, sort for determinism, fetch JARs, build output.
+    let mut entries: Vec<_> = resolved.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut compile_jars = Vec::new();
+    let mut runtime_jars = Vec::new();
+    let mut lock_entries = Vec::new();
+
+    vprintln!(
+        "  [verbose] BFS complete: {} dep(s) resolved",
+        entries.len()
+    );
+
+    for ((group, artifact), (version, scope)) in entries {
+        vprintln!(
+            "  [verbose] fetching JAR: {}:{}:{}",
+            group,
+            artifact,
+            version
+        );
+        let (jar_path, sha256) =
+            cache::fetch_jar(&group, &artifact, &version).with_context(|| {
+                format!("failed to fetch JAR for {}:{}:{}", group, artifact, version)
+            })?;
+
+        match scope {
+            TransitiveScope::Compile => {
+                compile_jars.push(jar_path.clone());
+                runtime_jars.push(jar_path);
+            }
+            TransitiveScope::Runtime => {
+                runtime_jars.push(jar_path);
+            }
+        }
+
+        lock_entries.push(LockedDependency {
+            group,
+            artifact,
+            version,
+            scope: scope_str(scope),
+            sha256,
+        });
+    }
+
+    Ok(ResolvedDeps {
+        compile_jars,
+        runtime_jars,
+        lock_entries,
+    })
+}
+
+// --- Helpers ---
+
+/// Update the resolved map for `key` with `(version, scope)`.
+///
+/// Updates when:
+/// - The key is new (not yet in the map), OR
+/// - `version` is higher than the current resolved version, OR
+/// - `scope` is higher (Compile > Runtime) than the current scope.
+///
+/// Returns `true` when the *version* changed and the dep's transitives must
+/// be (re-)fetched.
+fn update_resolved(
+    resolved: &mut HashMap<(String, String), (String, TransitiveScope)>,
+    key: (String, String),
+    version: String,
+    scope: TransitiveScope,
+) -> bool {
+    match resolved.get(&key) {
+        None => {
+            resolved.insert(key, (version, scope));
+            true
+        }
+        Some((existing_version, existing_scope)) => {
+            let version_higher = version_gt(&version, existing_version);
+            let new_version = if version_higher {
+                version.clone()
+            } else {
+                existing_version.clone()
+            };
+            let new_scope = higher_scope(scope, *existing_scope);
+
+            if version_higher || new_scope != *existing_scope {
+                resolved.insert(key, (new_version, new_scope));
+            }
+
+            // Only need to re-fetch transitives if the version actually changed.
+            version_higher
+        }
+    }
+}
+
+/// Apply the Maven scope mediation table.
+///
+/// | Parent scope | Child scope | Effective scope |
+/// |-------------|-------------|-----------------|
+/// | compile     | compile     | compile         |
+/// | compile     | runtime     | runtime         |
+/// | runtime     | compile     | runtime         |
+/// | runtime     | runtime     | runtime         |
+///
+/// `provided` / `test` transitives were already filtered by the POM parser.
+fn mediate_scope(parent: TransitiveScope, child: &TransitiveScope) -> TransitiveScope {
+    match (parent, child) {
+        (TransitiveScope::Compile, TransitiveScope::Compile) => TransitiveScope::Compile,
+        _ => TransitiveScope::Runtime,
+    }
+}
+
+/// Return the higher-priority scope (Compile > Runtime).
+fn higher_scope(a: TransitiveScope, b: TransitiveScope) -> TransitiveScope {
+    if a == TransitiveScope::Compile || b == TransitiveScope::Compile {
+        TransitiveScope::Compile
+    } else {
+        TransitiveScope::Runtime
+    }
+}
+
+fn from_manifest_scope(scope: &Scope) -> TransitiveScope {
+    match scope {
+        Scope::Compile => TransitiveScope::Compile,
+        Scope::Runtime => TransitiveScope::Runtime,
+    }
+}
+
+fn scope_str(scope: TransitiveScope) -> String {
+    match scope {
+        TransitiveScope::Compile => "compile".to_string(),
+        TransitiveScope::Runtime => "runtime".to_string(),
+    }
+}
+
+// --- Version comparison ---
+
+/// Return `true` if version `a` is strictly greater than version `b`.
+pub fn version_gt(a: &str, b: &str) -> bool {
+    compare_versions(a, b) == std::cmp::Ordering::Greater
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_segs = version_segments(a);
+    let b_segs = version_segments(b);
+    let len = a_segs.len().max(b_segs.len());
+
+    for i in 0..len {
+        let a_seg = a_segs.get(i).map(String::as_str).unwrap_or("0");
+        let b_seg = b_segs.get(i).map(String::as_str).unwrap_or("0");
+        match compare_segment(a_seg, b_seg) {
+            std::cmp::Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
+
+fn version_segments(v: &str) -> Vec<String> {
+    v.split(['.', '-'])
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn compare_segment(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(an), Ok(bn)) => an.cmp(&bn),
+        // Numeric segment vs qualifier: numeric is a release, qualifier is pre-release.
+        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+        (Err(_), Err(_)) => qualifier_rank(a)
+            .cmp(&qualifier_rank(b))
+            .then_with(|| a.cmp(b)),
+    }
+}
+
+/// Lower rank = lower version. Non-release qualifiers are negative.
+/// Trailing digits are stripped so "RC1", "BETA2" etc. rank the same as "RC", "BETA".
+fn qualifier_rank(q: &str) -> i32 {
+    let base = q.trim_end_matches(|c: char| c.is_ascii_digit());
+    match base.to_ascii_uppercase().as_str() {
+        "SNAPSHOT" => -4,
+        "ALPHA" => -3,
+        "BETA" => -2,
+        "RC" => -1,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Version comparison ---
+
+    #[test]
+    fn test_version_gt_numeric() {
+        assert!(version_gt("1.2.4", "1.2.3"));
+        assert!(version_gt("1.10.0", "1.9.0")); // numeric, not lexicographic
+        assert!(version_gt("2.0.0", "1.9.9"));
+        assert!(!version_gt("1.2.3", "1.2.3")); // equal
+        assert!(!version_gt("1.2.2", "1.2.3")); // lower
+    }
+
+    #[test]
+    fn test_version_gt_snapshot() {
+        assert!(version_gt("1.0.0", "1.0.0-SNAPSHOT"));
+        assert!(!version_gt("1.0.0-SNAPSHOT", "1.0.0"));
+    }
+
+    #[test]
+    fn test_version_gt_qualifiers() {
+        assert!(version_gt("1.0.0", "1.0.0-RC1"));
+        assert!(version_gt("1.0.0-RC1", "1.0.0-BETA1"));
+        assert!(version_gt("1.0.0-BETA1", "1.0.0-ALPHA1"));
+        assert!(version_gt("1.0.0-RC1", "1.0.0-SNAPSHOT"));
+    }
+
+    #[test]
+    fn test_version_segments() {
+        assert_eq!(version_segments("1.2.3"), vec!["1", "2", "3"]);
+        assert_eq!(version_segments("33.0.0-jre"), vec!["33", "0", "0", "jre"]);
+        assert_eq!(
+            version_segments("1.0.0-SNAPSHOT"),
+            vec!["1", "0", "0", "SNAPSHOT"]
+        );
+    }
+
+    // --- Scope mediation ---
+
+    #[test]
+    fn test_mediate_scope() {
+        use TransitiveScope::*;
+        assert_eq!(mediate_scope(Compile, &Compile), Compile);
+        assert_eq!(mediate_scope(Compile, &Runtime), Runtime);
+        assert_eq!(mediate_scope(Runtime, &Compile), Runtime);
+        assert_eq!(mediate_scope(Runtime, &Runtime), Runtime);
+    }
+
+    #[test]
+    fn test_higher_scope() {
+        use TransitiveScope::*;
+        assert_eq!(higher_scope(Compile, Runtime), Compile);
+        assert_eq!(higher_scope(Runtime, Compile), Compile);
+        assert_eq!(higher_scope(Compile, Compile), Compile);
+        assert_eq!(higher_scope(Runtime, Runtime), Runtime);
+    }
+
+    // --- update_resolved ---
+
+    #[test]
+    fn test_update_resolved_new_dep() {
+        let mut resolved = HashMap::new();
+        let key = ("com.example".to_string(), "foo".to_string());
+        let needs_fetch = update_resolved(
+            &mut resolved,
+            key.clone(),
+            "1.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        assert!(needs_fetch);
+        assert_eq!(resolved[&key].0, "1.0.0");
+        assert_eq!(resolved[&key].1, TransitiveScope::Compile);
+    }
+
+    #[test]
+    fn test_update_resolved_higher_version_wins() {
+        let mut resolved = HashMap::new();
+        let key = ("com.example".to_string(), "foo".to_string());
+        update_resolved(
+            &mut resolved,
+            key.clone(),
+            "1.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        let needs_fetch = update_resolved(
+            &mut resolved,
+            key.clone(),
+            "2.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        assert!(needs_fetch);
+        assert_eq!(resolved[&key].0, "2.0.0");
+    }
+
+    #[test]
+    fn test_update_resolved_lower_version_ignored() {
+        let mut resolved = HashMap::new();
+        let key = ("com.example".to_string(), "foo".to_string());
+        update_resolved(
+            &mut resolved,
+            key.clone(),
+            "2.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        let needs_fetch = update_resolved(
+            &mut resolved,
+            key.clone(),
+            "1.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        assert!(!needs_fetch);
+        assert_eq!(resolved[&key].0, "2.0.0"); // unchanged
+    }
+
+    #[test]
+    fn test_update_resolved_scope_upgraded() {
+        let mut resolved = HashMap::new();
+        let key = ("com.example".to_string(), "foo".to_string());
+        update_resolved(
+            &mut resolved,
+            key.clone(),
+            "1.0.0".to_string(),
+            TransitiveScope::Runtime,
+        );
+        // Same version but Compile scope → upgrade
+        let needs_fetch = update_resolved(
+            &mut resolved,
+            key.clone(),
+            "1.0.0".to_string(),
+            TransitiveScope::Compile,
+        );
+        assert!(!needs_fetch); // version didn't change, no re-fetch needed
+        assert_eq!(resolved[&key].1, TransitiveScope::Compile); // scope upgraded
+    }
+
+    // --- lock_is_fresh ---
+
+    fn make_dep(group: &str, artifact: &str, version: &str) -> Dependency {
+        Dependency {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            scope: Scope::Compile,
+            expose: false,
+        }
+    }
+
+    fn make_lock_entry(group: &str, artifact: &str, version: &str) -> LockedDependency {
+        LockedDependency {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            scope: "compile".to_string(),
+            sha256: "abc123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_lock_is_fresh_all_match() {
+        let deps = vec![make_dep("com.example", "foo", "1.0.0")];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_dep_missing_from_lock() {
+        let deps = vec![
+            make_dep("com.example", "foo", "1.0.0"),
+            make_dep("com.example", "bar", "2.0.0"),
+        ];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(!lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_version_changed() {
+        let deps = vec![make_dep("com.example", "foo", "2.0.0")];
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(!lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_extra_transitive_in_lock_is_ok() {
+        // Lock may have transitive deps not in the manifest — that's fine.
+        let deps = vec![make_dep("com.example", "foo", "1.0.0")];
+        let lock = LockFile {
+            dependency: vec![
+                make_lock_entry("com.example", "foo", "1.0.0"),
+                make_lock_entry("org.other", "transitive", "3.0.0"),
+            ],
+        };
+        assert!(lock_is_fresh(&deps, &lock));
+    }
+
+    #[test]
+    fn test_lock_is_fresh_empty_deps() {
+        let lock = LockFile {
+            dependency: vec![make_lock_entry("com.example", "foo", "1.0.0")],
+        };
+        assert!(lock_is_fresh(&[], &lock));
+    }
+}

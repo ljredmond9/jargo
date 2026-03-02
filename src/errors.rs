@@ -32,6 +32,9 @@ pub enum JargoError {
     #[error("`jargo run` requires an app project (type = \"app\")")]
     NotAnApp,
 
+    #[error("dependency `{0}:{1}` version `{2}` not found on Maven Central")]
+    DependencyNotFound(String, String, String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
