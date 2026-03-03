@@ -47,7 +47,7 @@ pub fn validate_name(name: &str) -> Result<(), JargoError> {
 }
 
 /// Execute `jargo new <name>`.
-pub fn exec(_gctx: &GlobalContext, name: &str, is_lib: bool) -> Result<()> {
+pub fn exec(gctx: &GlobalContext, name: &str, is_lib: bool) -> Result<()> {
     validate_name(name)?;
 
     let path = Path::new(name);
@@ -68,7 +68,8 @@ pub fn exec(_gctx: &GlobalContext, name: &str, is_lib: bool) -> Result<()> {
         .status();
 
     let kind = if is_lib { "lib" } else { "app" };
-    println!("    Created {kind} `{name}` package");
+    gctx.shell
+        .status("Created", &format!("{kind} `{name}` package"));
 
     Ok(())
 }

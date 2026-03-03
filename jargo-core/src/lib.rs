@@ -6,7 +6,7 @@ pub mod gradle_module;
 pub mod jar;
 pub mod lockfile;
 pub mod manifest;
-pub mod output;
 pub mod pom;
 pub mod resolver;
+pub mod shell;
 pub mod staging;

@@ -8,9 +8,9 @@ pub fn exec(gctx: &GlobalContext) -> Result<()> {
 
     if target.exists() {
         fs::remove_dir_all(&target)?;
-        println!("     Removed target directory");
+        gctx.shell.status("Removed", "target directory");
     } else {
-        println!("     Nothing to clean");
+        gctx.shell.status("Nothing", "to clean");
     }
 
     Ok(())

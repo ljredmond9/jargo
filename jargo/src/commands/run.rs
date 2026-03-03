@@ -26,9 +26,12 @@ pub fn exec(gctx: &GlobalContext, args: Vec<String>) -> Result<()> {
     let resolved = resolver::resolve(gctx, &gctx.cwd, &manifest)?;
 
     // Compile
-    println!(
-        "   Compiling {} v{} (java {})",
-        manifest.package.name, manifest.package.version, manifest.package.java
+    gctx.shell.status(
+        "Compiling",
+        &format!(
+            "{} v{} (java {})",
+            manifest.package.name, manifest.package.version, manifest.package.java
+        ),
     );
 
     let compile_output = compiler::compile(gctx, &gctx.cwd, &manifest, &resolved.compile_jars)?;
@@ -60,7 +63,7 @@ pub fn exec(gctx: &GlobalContext, args: Vec<String>) -> Result<()> {
     let fq_main_class = format!("{}.{}", base_package, main_class);
 
     // Invoke java
-    println!("     Running {}", manifest.package.name);
+    gctx.shell.status("Running", &manifest.package.name);
 
     let jvm_args = manifest.get_jvm_args();
 

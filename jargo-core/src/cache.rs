@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use crate::context::GlobalContext;
 use crate::errors::JargoError;
-use crate::vprintln;
 
 /// Whether a fetched metadata file is a Gradle `.module` (JSON) or Maven `.pom` (XML).
 #[derive(Debug, Clone, PartialEq)]
@@ -38,11 +37,12 @@ pub fn fetch_metadata(
     // Check for cached .module
     let module_path = dir.join(artifact_filename(artifact, version, "module"));
     if module_path.exists() {
-        vprintln!(
-            gctx,
-            "  [verbose]   cache hit (.module): {}",
-            module_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.module): {}",
+                module_path.display()
+            ))
+        });
         return Ok(FetchedMetadata {
             path: module_path,
             format: MetadataFormat::Module,
@@ -52,11 +52,12 @@ pub fn fetch_metadata(
     // Check for cached .pom
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
-        vprintln!(
-            gctx,
-            "  [verbose]   cache hit (.pom): {}",
-            pom_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.pom): {}",
+                pom_path.display()
+            ))
+        });
         return Ok(FetchedMetadata {
             path: pom_path,
             format: MetadataFormat::Pom,
@@ -68,9 +69,13 @@ pub fn fetch_metadata(
 
     // Try .module first
     let module_url = maven_central_url(group, artifact, version, "module");
-    vprintln!(gctx, "  [verbose]   downloading .module: {}", module_url);
+    gctx.shell
+        .verbose(|sh| sh.print(format!("  [verbose]   downloading .module: {}", module_url)));
     if try_download(&client, &module_url, &module_path)? {
-        println!("  Fetching  {}:{}:{} (.module)", group, artifact, version);
+        gctx.shell.status(
+            "Fetching",
+            &format!("{}:{}:{} (.module)", group, artifact, version),
+        );
         return Ok(FetchedMetadata {
             path: module_path,
             format: MetadataFormat::Module,
@@ -79,12 +84,14 @@ pub fn fetch_metadata(
 
     // Fall back to .pom
     let pom_url = maven_central_url(group, artifact, version, "pom");
-    vprintln!(
-        gctx,
-        "  [verbose]   .module not found, trying .pom: {}",
-        pom_url
-    );
-    println!("  Fetching  {}:{}:{}", group, artifact, version);
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose]   .module not found, trying .pom: {}",
+            pom_url
+        ))
+    });
+    gctx.shell
+        .status("Fetching", &format!("{}:{}:{}", group, artifact, version));
     if try_download(&client, &pom_url, &pom_path)? {
         return Ok(FetchedMetadata {
             path: pom_path,
@@ -117,17 +124,23 @@ pub fn fetch_pom(
 
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
-        vprintln!(
-            gctx,
-            "  [verbose]   cache hit (.pom for parent): {}",
-            pom_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.pom for parent): {}",
+                pom_path.display()
+            ))
+        });
         return Ok(pom_path);
     }
 
     let client = http_client()?;
     let pom_url = maven_central_url(group, artifact, version, "pom");
-    vprintln!(gctx, "  [verbose]   downloading parent .pom: {}", pom_url);
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose]   downloading parent .pom: {}",
+            pom_url
+        ))
+    });
     if try_download(&client, &pom_url, &pom_path)? {
         return Ok(pom_path);
     }
@@ -160,11 +173,12 @@ pub fn fetch_jar(
     let sha_path = dir.join(artifact_filename(artifact, version, "jar.sha256"));
 
     if jar_path.exists() && sha_path.exists() {
-        vprintln!(
-            gctx,
-            "  [verbose]   cache hit (.jar): {}",
-            jar_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.jar): {}",
+                jar_path.display()
+            ))
+        });
         let sha256 = fs::read_to_string(&sha_path)
             .with_context(|| format!("failed to read {}", sha_path.display()))?
             .trim()
@@ -174,8 +188,12 @@ pub fn fetch_jar(
 
     // Download the JAR
     let url = maven_central_url(group, artifact, version, "jar");
-    vprintln!(gctx, "  [verbose]   downloading .jar: {}", url);
-    println!("  Fetching  {}:{}:{} (jar)", group, artifact, version);
+    gctx.shell
+        .verbose(|sh| sh.print(format!("  [verbose]   downloading .jar: {}", url)));
+    gctx.shell.status(
+        "Fetching",
+        &format!("{}:{}:{} (jar)", group, artifact, version),
+    );
 
     let client = http_client()?;
     if !try_download(&client, &url, &jar_path)? {

@@ -22,9 +22,12 @@ pub fn exec(gctx: &GlobalContext) -> Result<()> {
     let resolved = resolver::resolve(gctx, &gctx.cwd, &manifest)?;
 
     // Print Cargo-style compilation status
-    println!(
-        "   Compiling {} v{} (java {})",
-        manifest.package.name, manifest.package.version, manifest.package.java
+    gctx.shell.status(
+        "Compiling",
+        &format!(
+            "{} v{} (java {})",
+            manifest.package.name, manifest.package.version, manifest.package.java
+        ),
     );
 
     // Compile with dependency classpath
@@ -40,12 +43,15 @@ pub fn exec(gctx: &GlobalContext) -> Result<()> {
     // Assemble JAR
     let jar_path = jar::assemble_jar(gctx, &gctx.cwd, &manifest)?;
 
-    println!(
-        "    Finished JAR at {}",
-        jar_path
-            .strip_prefix(&gctx.cwd)
-            .unwrap_or(&jar_path)
-            .display()
+    gctx.shell.status(
+        "Finished",
+        &format!(
+            "JAR at {}",
+            jar_path
+                .strip_prefix(&gctx.cwd)
+                .unwrap_or(&jar_path)
+                .display()
+        ),
     );
 
     Ok(())

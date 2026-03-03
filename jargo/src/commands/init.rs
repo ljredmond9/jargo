@@ -18,7 +18,8 @@ pub fn exec(gctx: &GlobalContext, is_lib: bool) -> Result<()> {
     scaffold(&gctx.cwd, &name, is_lib)?;
 
     let kind = if is_lib { "lib" } else { "app" };
-    println!("    Created {kind} `{name}` package");
+    gctx.shell
+        .status("Created", &format!("{kind} `{name}` package"));
 
     Ok(())
 }

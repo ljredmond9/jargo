@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+use crate::shell::{Shell, Verbosity};
+
 pub struct GlobalContext {
-    pub verbose: bool,
     pub jargo_home: PathBuf, // ~/.jargo/
     pub cwd: PathBuf,
+    pub shell: Shell,
 }
 
 impl GlobalContext {
@@ -14,8 +16,13 @@ impl GlobalContext {
             .or_else(|_| std::env::var("USERPROFILE"))
             .context("could not determine home directory")?;
         let jargo_home = PathBuf::from(home).join(".jargo");
+        let verbosity = if verbose {
+            Verbosity::Verbose
+        } else {
+            Verbosity::Normal
+        };
         Ok(Self {
-            verbose,
+            shell: Shell::new(verbosity),
             jargo_home,
             cwd,
         })
