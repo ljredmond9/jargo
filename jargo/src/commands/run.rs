@@ -1,15 +1,14 @@
 use anyhow::Result;
-use std::env;
 use std::process::Command;
 
-use crate::compiler;
-use crate::errors::JargoError;
-use crate::manifest::JargoToml;
-use crate::resolver;
+use jargo_core::compiler;
+use jargo_core::context::GlobalContext;
+use jargo_core::errors::JargoError;
+use jargo_core::manifest::JargoToml;
+use jargo_core::resolver;
 
-pub fn exec(args: Vec<String>) -> Result<()> {
-    let cwd = env::current_dir()?;
-    let manifest_path = cwd.join("Jargo.toml");
+pub fn exec(gctx: &GlobalContext, args: Vec<String>) -> Result<()> {
+    let manifest_path = gctx.cwd.join("Jargo.toml");
 
     if !manifest_path.exists() {
         return Err(JargoError::ManifestNotFound.into());
@@ -24,15 +23,18 @@ pub fn exec(args: Vec<String>) -> Result<()> {
     }
 
     // Resolve dependencies (uses lock file if present, else resolves + writes lock)
-    let resolved = resolver::resolve(&cwd, &manifest)?;
+    let resolved = resolver::resolve(gctx, &gctx.cwd, &manifest)?;
 
     // Compile
-    println!(
-        "   Compiling {} v{} (java {})",
-        manifest.package.name, manifest.package.version, manifest.package.java
+    gctx.shell.status(
+        "Compiling",
+        &format!(
+            "{} v{} (java {})",
+            manifest.package.name, manifest.package.version, manifest.package.java
+        ),
     );
 
-    let compile_output = compiler::compile(&cwd, &manifest, &resolved.compile_jars)?;
+    let compile_output = compiler::compile(gctx, &gctx.cwd, &manifest, &resolved.compile_jars)?;
 
     if !compile_output.success {
         for error in compile_output.errors {
@@ -42,7 +44,7 @@ pub fn exec(args: Vec<String>) -> Result<()> {
     }
 
     // Assemble the runtime classpath: compiled classes + dependency JARs.
-    let classes_dir = cwd.join("target/classes");
+    let classes_dir = gctx.cwd.join("target/classes");
 
     #[cfg(windows)]
     let sep = ";";
@@ -61,7 +63,7 @@ pub fn exec(args: Vec<String>) -> Result<()> {
     let fq_main_class = format!("{}.{}", base_package, main_class);
 
     // Invoke java
-    println!("     Running {}", manifest.package.name);
+    gctx.shell.status("Running", &manifest.package.name);
 
     let jvm_args = manifest.get_jvm_args();
 
@@ -71,7 +73,7 @@ pub fn exec(args: Vec<String>) -> Result<()> {
         .args(jvm_args)
         .arg(&fq_main_class)
         .args(&args)
-        .current_dir(&cwd)
+        .current_dir(&gctx.cwd)
         .status()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {

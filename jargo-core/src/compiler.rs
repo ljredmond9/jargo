@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::context::GlobalContext;
 use crate::errors::JargoError;
 use crate::manifest::JargoToml;
 use crate::staging;
@@ -16,6 +17,7 @@ pub struct CompileOutput {
 ///
 /// `classpath` is a list of dependency JAR paths placed on `-classpath` for `javac`.
 pub fn compile(
+    _gctx: &GlobalContext,
     project_root: &Path,
     manifest: &JargoToml,
     classpath: &[PathBuf],

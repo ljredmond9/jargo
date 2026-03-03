@@ -825,6 +825,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jargo-core",
+ "tempfile",
+]
+
+[[package]]
+name = "jargo-bsp"
+version = "0.1.0"
+dependencies = [
+ "jargo-core",
+]
+
+[[package]]
+name = "jargo-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "quick-xml",
  "reqwest",
  "serde",

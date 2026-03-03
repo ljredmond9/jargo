@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::context::GlobalContext;
 use crate::errors::JargoError;
-use crate::vprintln;
 
 /// Whether a fetched metadata file is a Gradle `.module` (JSON) or Maven `.pom` (XML).
 #[derive(Debug, Clone, PartialEq)]
@@ -23,18 +23,26 @@ pub struct FetchedMetadata {
 ///
 /// Returns the cached file if already present; downloads otherwise.
 /// Tries `.module` first; falls back to `.pom` if `.module` is not available.
-pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<FetchedMetadata> {
-    let dir = artifact_dir(group, artifact, version)?;
+pub fn fetch_metadata(
+    gctx: &GlobalContext,
+    group: &str,
+    artifact: &str,
+    version: &str,
+) -> Result<FetchedMetadata> {
+    let cache_dir = gctx.jargo_home.join("cache");
+    let dir = artifact_dir(&cache_dir, group, artifact, version);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create cache dir {}", dir.display()))?;
 
     // Check for cached .module
     let module_path = dir.join(artifact_filename(artifact, version, "module"));
     if module_path.exists() {
-        vprintln!(
-            "  [verbose]   cache hit (.module): {}",
-            module_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.module): {}",
+                module_path.display()
+            ))
+        });
         return Ok(FetchedMetadata {
             path: module_path,
             format: MetadataFormat::Module,
@@ -44,7 +52,12 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
     // Check for cached .pom
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
-        vprintln!("  [verbose]   cache hit (.pom): {}", pom_path.display());
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.pom): {}",
+                pom_path.display()
+            ))
+        });
         return Ok(FetchedMetadata {
             path: pom_path,
             format: MetadataFormat::Pom,
@@ -56,9 +69,13 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
 
     // Try .module first
     let module_url = maven_central_url(group, artifact, version, "module");
-    vprintln!("  [verbose]   downloading .module: {}", module_url);
+    gctx.shell
+        .verbose(|sh| sh.print(format!("  [verbose]   downloading .module: {}", module_url)));
     if try_download(&client, &module_url, &module_path)? {
-        println!("  Fetching  {}:{}:{} (.module)", group, artifact, version);
+        gctx.shell.status(
+            "Fetching",
+            &format!("{}:{}:{} (.module)", group, artifact, version),
+        );
         return Ok(FetchedMetadata {
             path: module_path,
             format: MetadataFormat::Module,
@@ -67,8 +84,14 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
 
     // Fall back to .pom
     let pom_url = maven_central_url(group, artifact, version, "pom");
-    vprintln!("  [verbose]   .module not found, trying .pom: {}", pom_url);
-    println!("  Fetching  {}:{}:{}", group, artifact, version);
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose]   .module not found, trying .pom: {}",
+            pom_url
+        ))
+    });
+    gctx.shell
+        .status("Fetching", &format!("{}:{}:{}", group, artifact, version));
     if try_download(&client, &pom_url, &pom_path)? {
         return Ok(FetchedMetadata {
             path: pom_path,
@@ -88,23 +111,36 @@ pub fn fetch_metadata(group: &str, artifact: &str, version: &str) -> Result<Fetc
 ///
 /// Used for parent POM chain resolution: we always need the POM's XML even if
 /// a `.module` file exists for the same artifact.
-pub fn fetch_pom(group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-    let dir = artifact_dir(group, artifact, version)?;
+pub fn fetch_pom(
+    gctx: &GlobalContext,
+    group: &str,
+    artifact: &str,
+    version: &str,
+) -> Result<PathBuf> {
+    let cache_dir = gctx.jargo_home.join("cache");
+    let dir = artifact_dir(&cache_dir, group, artifact, version);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create cache dir {}", dir.display()))?;
 
     let pom_path = dir.join(artifact_filename(artifact, version, "pom"));
     if pom_path.exists() {
-        vprintln!(
-            "  [verbose]   cache hit (.pom for parent): {}",
-            pom_path.display()
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.pom for parent): {}",
+                pom_path.display()
+            ))
+        });
         return Ok(pom_path);
     }
 
     let client = http_client()?;
     let pom_url = maven_central_url(group, artifact, version, "pom");
-    vprintln!("  [verbose]   downloading parent .pom: {}", pom_url);
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose]   downloading parent .pom: {}",
+            pom_url
+        ))
+    });
     if try_download(&client, &pom_url, &pom_path)? {
         return Ok(pom_path);
     }
@@ -122,8 +158,14 @@ pub fn fetch_pom(group: &str, artifact: &str, version: &str) -> Result<PathBuf> 
 /// Returns `(path_to_jar, sha256_hex)`. The sha256 is read from a companion
 /// `.jar.sha256` file if the JAR is already cached, or computed and stored
 /// after a fresh download.
-pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf, String)> {
-    let dir = artifact_dir(group, artifact, version)?;
+pub fn fetch_jar(
+    gctx: &GlobalContext,
+    group: &str,
+    artifact: &str,
+    version: &str,
+) -> Result<(PathBuf, String)> {
+    let cache_dir = gctx.jargo_home.join("cache");
+    let dir = artifact_dir(&cache_dir, group, artifact, version);
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create cache dir {}", dir.display()))?;
 
@@ -131,7 +173,12 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
     let sha_path = dir.join(artifact_filename(artifact, version, "jar.sha256"));
 
     if jar_path.exists() && sha_path.exists() {
-        vprintln!("  [verbose]   cache hit (.jar): {}", jar_path.display());
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   cache hit (.jar): {}",
+                jar_path.display()
+            ))
+        });
         let sha256 = fs::read_to_string(&sha_path)
             .with_context(|| format!("failed to read {}", sha_path.display()))?
             .trim()
@@ -141,8 +188,12 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
 
     // Download the JAR
     let url = maven_central_url(group, artifact, version, "jar");
-    vprintln!("  [verbose]   downloading .jar: {}", url);
-    println!("  Fetching  {}:{}:{} (jar)", group, artifact, version);
+    gctx.shell
+        .verbose(|sh| sh.print(format!("  [verbose]   downloading .jar: {}", url)));
+    gctx.shell.status(
+        "Fetching",
+        &format!("{}:{}:{} (jar)", group, artifact, version),
+    );
 
     let client = http_client()?;
     if !try_download(&client, &url, &jar_path)? {
@@ -163,12 +214,12 @@ pub fn fetch_jar(group: &str, artifact: &str, version: &str) -> Result<(PathBuf,
 
 /// Return the cache directory for a specific artifact version.
 ///
-/// Structure mirrors Maven Central: `~/.jargo/cache/{group-path}/{artifact}/{version}/`
-pub fn artifact_dir(group: &str, artifact: &str, version: &str) -> Result<PathBuf> {
-    Ok(cache_base()?
+/// Structure mirrors Maven Central: `<cache_dir>/{group-path}/{artifact}/{version}/`
+pub fn artifact_dir(cache_dir: &Path, group: &str, artifact: &str, version: &str) -> PathBuf {
+    cache_dir
         .join(group_to_path(group))
         .join(artifact)
-        .join(version))
+        .join(version)
 }
 
 // --- Pure helpers (pub for unit testing) ---
@@ -199,13 +250,6 @@ pub fn artifact_filename(artifact: &str, version: &str, ext: &str) -> String {
 }
 
 // --- Private helpers ---
-
-fn cache_base() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .context("could not determine home directory ($HOME is not set)")?;
-    Ok(PathBuf::from(home).join(".jargo").join("cache"))
-}
 
 fn http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
@@ -325,10 +369,9 @@ mod tests {
 
     #[test]
     fn test_artifact_dir_structure() {
-        // Just verify the path is structured correctly relative to cache base.
-        // We can't check the absolute path without knowing $HOME, but we can
-        // verify the suffix.
-        let dir = artifact_dir("com.google.guava", "guava", "33.0.0-jre").unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join(".jargo").join("cache");
+        let dir = artifact_dir(&cache_dir, "com.google.guava", "guava", "33.0.0-jre");
         let dir_str = dir.to_string_lossy();
         assert!(dir_str.contains(".jargo/cache/com/google/guava/guava/33.0.0-jre"));
     }

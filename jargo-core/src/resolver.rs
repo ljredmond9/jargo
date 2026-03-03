@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::cache::{self, MetadataFormat};
+use crate::context::GlobalContext;
 use crate::gradle_module;
 use crate::lockfile::{LockFile, LockedDependency};
 use crate::manifest::{Dependency, JargoToml, Scope};
 use crate::pom::{ParsedPom, TransitiveDep, TransitiveScope};
-use crate::vprintln;
 
 /// The output of dependency resolution: classpath JAR lists and lock file entries.
 pub struct ResolvedDeps {
@@ -37,11 +37,16 @@ impl ResolvedDeps {
 ///   writes a new `Jargo.lock`, and returns the resulting classpaths.
 ///
 /// Returns empty classpaths immediately when there are no dependencies.
-pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps> {
+pub fn resolve(
+    gctx: &GlobalContext,
+    project_root: &Path,
+    manifest: &JargoToml,
+) -> Result<ResolvedDeps> {
     let direct_deps = manifest.get_dependencies()?;
 
     if direct_deps.is_empty() {
-        vprintln!("  [verbose] no dependencies declared");
+        gctx.shell
+            .verbose(|sh| sh.print("  [verbose] no dependencies declared"));
         return Ok(ResolvedDeps::empty());
     }
 
@@ -50,25 +55,29 @@ pub fn resolve(project_root: &Path, manifest: &JargoToml) -> Result<ResolvedDeps
     if lock_path.exists() {
         let lock = LockFile::read(&lock_path)?;
         if lock_is_fresh(&direct_deps, &lock) {
-            vprintln!(
-                "  [verbose] lock file is up to date: {}",
-                lock_path.display()
-            );
-            return resolve_from_lock(&lock);
+            gctx.shell.verbose(|sh| {
+                sh.print(format!(
+                    "  [verbose] lock file is up to date: {}",
+                    lock_path.display()
+                ))
+            });
+            return resolve_from_lock(gctx, &lock);
         }
-        vprintln!("  [verbose] lock file is out of date, re-resolving");
+        gctx.shell
+            .verbose(|sh| sh.print("  [verbose] lock file is out of date, re-resolving"));
     }
 
-    println!("  Resolving dependencies...");
-    let resolved = resolve_fresh(&direct_deps)?;
+    gctx.shell.status("Resolving", "dependencies");
+    let resolved = resolve_fresh(gctx, &direct_deps)?;
 
     let lock = LockFile {
         dependency: resolved.lock_entries.clone(),
     };
-    vprintln!("  [verbose] writing Jargo.lock");
+    gctx.shell
+        .verbose(|sh| sh.print("  [verbose] writing Jargo.lock"));
     lock.write(&lock_path)
         .context("failed to write Jargo.lock")?;
-    println!("     Locking dependencies");
+    gctx.shell.status("Locking", "dependencies");
 
     Ok(resolved)
 }
@@ -90,35 +99,38 @@ fn lock_is_fresh(direct_deps: &[Dependency], lock: &LockFile) -> bool {
 
 /// Build classpaths from an existing `Jargo.lock` without re-resolving.
 /// Fetches JARs from the local cache (downloading if absent).
-fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
-    vprintln!(
-        "  [verbose] lock file has {} entr{}",
-        lock.dependency.len(),
-        if lock.dependency.len() == 1 {
-            "y"
-        } else {
-            "ies"
-        }
-    );
+fn resolve_from_lock(gctx: &GlobalContext, lock: &LockFile) -> Result<ResolvedDeps> {
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose] lock file has {} entr{}",
+            lock.dependency.len(),
+            if lock.dependency.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ))
+    });
 
     let mut compile_jars = Vec::new();
     let mut runtime_jars = Vec::new();
 
     for entry in &lock.dependency {
-        vprintln!(
-            "  [verbose] fetching {}:{}:{} ({})",
-            entry.group,
-            entry.artifact,
-            entry.version,
-            entry.scope
-        );
-        let (jar_path, _sha256) = cache::fetch_jar(&entry.group, &entry.artifact, &entry.version)
-            .with_context(|| {
-            format!(
-                "failed to fetch JAR for {}:{}:{}",
-                entry.group, entry.artifact, entry.version
-            )
-        })?;
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose] fetching {}:{}:{} ({})",
+                entry.group, entry.artifact, entry.version, entry.scope
+            ))
+        });
+        let (jar_path, _sha256) =
+            cache::fetch_jar(gctx, &entry.group, &entry.artifact, &entry.version).with_context(
+                || {
+                    format!(
+                        "failed to fetch JAR for {}:{}:{}",
+                        entry.group, entry.artifact, entry.version
+                    )
+                },
+            )?;
 
         match entry.scope.as_str() {
             "compile" => {
@@ -132,11 +144,13 @@ fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
         }
     }
 
-    vprintln!(
-        "  [verbose] classpath ready: {} compile JAR(s), {} runtime JAR(s)",
-        compile_jars.len(),
-        runtime_jars.len()
-    );
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose] classpath ready: {} compile JAR(s), {} runtime JAR(s)",
+            compile_jars.len(),
+            runtime_jars.len()
+        ))
+    });
 
     Ok(ResolvedDeps {
         compile_jars,
@@ -159,7 +173,7 @@ fn resolve_from_lock(lock: &LockFile) -> Result<ResolvedDeps> {
 /// 5. For each transitive dep, apply scope mediation; if it's new or its
 ///    version is higher, update the resolved map and enqueue for fetching.
 /// 6. After BFS, fetch all JARs and assemble classpaths and lock entries.
-fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
+fn resolve_fresh(gctx: &GlobalContext, direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
     // (group, artifact) → (highest_version, effective_scope)
     let mut resolved: HashMap<(String, String), (String, TransitiveScope)> = HashMap::new();
     // Guards against fetching the same (group, artifact, version) twice.
@@ -192,29 +206,31 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
         fetched.insert(fetch_key);
 
         // Fetch POM or .module from Maven Central (cached after first download).
-        vprintln!(
-            "  [verbose] resolving metadata: {}:{}:{}",
-            group,
-            artifact,
-            version
-        );
-        let metadata = cache::fetch_metadata(&group, &artifact, &version)
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose] resolving metadata: {}:{}:{}",
+                group, artifact, version
+            ))
+        });
+        let metadata = cache::fetch_metadata(gctx, &group, &artifact, &version)
             .with_context(|| format!("failed to resolve {}:{}:{}", group, artifact, version))?;
 
         // Parse transitive deps from whichever format was returned.
         let transitives: Vec<TransitiveDep> = match metadata.format {
             MetadataFormat::Module => gradle_module::parse_module(&metadata.path)
                 .with_context(|| format!("failed to parse .module for {}:{}", group, artifact))?,
-            MetadataFormat::Pom => pom_transitive_deps(&metadata.path)
+            MetadataFormat::Pom => pom_transitive_deps(gctx, &metadata.path)
                 .with_context(|| format!("failed to parse POM for {}:{}", group, artifact))?,
         };
 
-        vprintln!(
-            "  [verbose]   {} transitive dep(s) from {}:{}",
-            transitives.len(),
-            group,
-            artifact
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose]   {} transitive dep(s) from {}:{}",
+                transitives.len(),
+                group,
+                artifact
+            ))
+        });
 
         for trans in transitives {
             let child_scope = mediate_scope(scope, &trans.scope);
@@ -242,20 +258,22 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
     let mut runtime_jars = Vec::new();
     let mut lock_entries = Vec::new();
 
-    vprintln!(
-        "  [verbose] BFS complete: {} dep(s) resolved",
-        entries.len()
-    );
+    gctx.shell.verbose(|sh| {
+        sh.print(format!(
+            "  [verbose] BFS complete: {} dep(s) resolved",
+            entries.len()
+        ))
+    });
 
     for ((group, artifact), (version, scope)) in entries {
-        vprintln!(
-            "  [verbose] fetching JAR: {}:{}:{}",
-            group,
-            artifact,
-            version
-        );
+        gctx.shell.verbose(|sh| {
+            sh.print(format!(
+                "  [verbose] fetching JAR: {}:{}:{}",
+                group, artifact, version
+            ))
+        });
         let (jar_path, sha256) =
-            cache::fetch_jar(&group, &artifact, &version).with_context(|| {
+            cache::fetch_jar(gctx, &group, &artifact, &version).with_context(|| {
                 format!("failed to fetch JAR for {}:{}:{}", group, artifact, version)
             })?;
 
@@ -290,9 +308,12 @@ fn resolve_fresh(direct_deps: &[Dependency]) -> Result<ResolvedDeps> {
 /// Resolve transitive dependencies from a POM file, applying Phase 2 features:
 /// parent chain resolution, `${property}` substitution, and `<dependencyManagement>`
 /// version lookup.
-fn pom_transitive_deps(metadata_path: &std::path::Path) -> Result<Vec<TransitiveDep>> {
+fn pom_transitive_deps(
+    gctx: &GlobalContext,
+    metadata_path: &std::path::Path,
+) -> Result<Vec<TransitiveDep>> {
     let raw = crate::pom::parse_pom_raw(metadata_path)?;
-    let effective = build_effective_pom(&raw, 0)?;
+    let effective = build_effective_pom(gctx, &raw, 0)?;
 
     let mut result = Vec::new();
     for dep in &raw.direct_deps {
@@ -359,7 +380,7 @@ struct EffectivePom {
 /// `<dependencyManagement>` map for the given POM.
 ///
 /// Child properties and managed entries override those inherited from parents.
-fn build_effective_pom(pom: &ParsedPom, depth: u8) -> Result<EffectivePom> {
+fn build_effective_pom(gctx: &GlobalContext, pom: &ParsedPom, depth: u8) -> Result<EffectivePom> {
     const MAX_DEPTH: u8 = 10;
     if depth > MAX_DEPTH {
         anyhow::bail!(
@@ -376,27 +397,31 @@ fn build_effective_pom(pom: &ParsedPom, depth: u8) -> Result<EffectivePom> {
 
     if let Some(parent_ref) = &pom.parent {
         if !parent_ref.version.is_empty() {
-            vprintln!(
-                "  [verbose]   resolving parent POM {}:{}:{}",
-                parent_ref.group,
-                parent_ref.artifact,
-                parent_ref.version
-            );
-            let parent_path =
-                cache::fetch_pom(&parent_ref.group, &parent_ref.artifact, &parent_ref.version)
-                    .with_context(|| {
-                        format!(
-                            "failed to fetch parent POM {}:{}:{}",
-                            parent_ref.group, parent_ref.artifact, parent_ref.version
-                        )
-                    })?;
+            gctx.shell.verbose(|sh| {
+                sh.print(format!(
+                    "  [verbose]   resolving parent POM {}:{}:{}",
+                    parent_ref.group, parent_ref.artifact, parent_ref.version
+                ))
+            });
+            let parent_path = cache::fetch_pom(
+                gctx,
+                &parent_ref.group,
+                &parent_ref.artifact,
+                &parent_ref.version,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to fetch parent POM {}:{}:{}",
+                    parent_ref.group, parent_ref.artifact, parent_ref.version
+                )
+            })?;
             let parent_pom = crate::pom::parse_pom_raw(&parent_path).with_context(|| {
                 format!(
                     "failed to parse parent POM {}:{}:{}",
                     parent_ref.group, parent_ref.artifact, parent_ref.version
                 )
             })?;
-            let parent = build_effective_pom(&parent_pom, depth + 1)?;
+            let parent = build_effective_pom(gctx, &parent_pom, depth + 1)?;
             parent_group = parent.group;
             parent_version = parent.version;
             merged_props = parent.props;
@@ -880,13 +905,22 @@ mod tests {
 
     // --- pom_transitive_deps (unit tests using temp files, no network) ---
 
+    fn make_test_gctx(tmp: &tempfile::TempDir) -> crate::context::GlobalContext {
+        crate::context::GlobalContext {
+            cwd: tmp.path().to_path_buf(),
+            jargo_home: tmp.path().join(".jargo"),
+            shell: crate::shell::Shell::new(crate::shell::Verbosity::Normal),
+        }
+    }
+
     #[test]
     fn test_pom_transitive_deps_with_property_version() {
         use std::fs;
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
-        let pom_path = dir.path().join("test.pom");
+        let tmp = TempDir::new().unwrap();
+        let gctx = make_test_gctx(&tmp);
+        let pom_path = tmp.path().join("test.pom");
         let xml = r#"<?xml version="1.0"?>
 <project>
   <groupId>com.example</groupId>
@@ -904,7 +938,7 @@ mod tests {
   </dependencies>
 </project>"#;
         fs::write(&pom_path, xml).unwrap();
-        let deps = pom_transitive_deps(&pom_path).unwrap();
+        let deps = pom_transitive_deps(&gctx, &pom_path).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].artifact, "commons-lang3");
         assert_eq!(deps[0].version, "1.5.0");
@@ -915,8 +949,9 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
-        let pom_path = dir.path().join("test.pom");
+        let tmp = TempDir::new().unwrap();
+        let gctx = make_test_gctx(&tmp);
+        let pom_path = tmp.path().join("test.pom");
         let xml = r#"<?xml version="1.0"?>
 <project>
   <groupId>com.example</groupId>
@@ -939,7 +974,7 @@ mod tests {
   </dependencies>
 </project>"#;
         fs::write(&pom_path, xml).unwrap();
-        let deps = pom_transitive_deps(&pom_path).unwrap();
+        let deps = pom_transitive_deps(&gctx, &pom_path).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].group, "org.example");
         assert_eq!(deps[0].artifact, "foo");
@@ -952,8 +987,9 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
-        let pom_path = dir.path().join("test.pom");
+        let tmp = TempDir::new().unwrap();
+        let gctx = make_test_gctx(&tmp);
+        let pom_path = tmp.path().join("test.pom");
         // A common pattern: BOM-style POM where managed versions reference ${project.version}
         let xml = r#"<?xml version="1.0"?>
 <project>
@@ -977,7 +1013,7 @@ mod tests {
   </dependencies>
 </project>"#;
         fs::write(&pom_path, xml).unwrap();
-        let deps = pom_transitive_deps(&pom_path).unwrap();
+        let deps = pom_transitive_deps(&gctx, &pom_path).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].version, "5.0.0");
     }
@@ -987,8 +1023,9 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let dir = TempDir::new().unwrap();
-        let pom_path = dir.path().join("test.pom");
+        let tmp = TempDir::new().unwrap();
+        let gctx = make_test_gctx(&tmp);
+        let pom_path = tmp.path().join("test.pom");
         // A dep with no version and no managed entry — should be skipped
         let xml = r#"<?xml version="1.0"?>
 <project>
@@ -1008,7 +1045,7 @@ mod tests {
   </dependencies>
 </project>"#;
         fs::write(&pom_path, xml).unwrap();
-        let deps = pom_transitive_deps(&pom_path).unwrap();
+        let deps = pom_transitive_deps(&gctx, &pom_path).unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].artifact, "has-version");
     }

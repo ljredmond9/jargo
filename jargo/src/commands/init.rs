@@ -1,26 +1,25 @@
-use std::env;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::commands::new::{scaffold, validate_name};
-use crate::errors::JargoError;
+use jargo_core::context::GlobalContext;
+use jargo_core::errors::JargoError;
 
 /// Execute `jargo init`.
-pub fn exec(is_lib: bool) -> Result<()> {
-    let cwd = env::current_dir().context("failed to get current directory")?;
-
-    if cwd.join("Jargo.toml").exists() {
+pub fn exec(gctx: &GlobalContext, is_lib: bool) -> Result<()> {
+    if gctx.cwd.join("Jargo.toml").exists() {
         return Err(JargoError::AlreadyInitialized.into());
     }
 
-    let name = dir_name(&cwd)?;
+    let name = dir_name(&gctx.cwd)?;
     validate_name(&name)?;
 
-    scaffold(&cwd, &name, is_lib)?;
+    scaffold(&gctx.cwd, &name, is_lib)?;
 
     let kind = if is_lib { "lib" } else { "app" };
-    println!("    Created {kind} `{name}` package");
+    gctx.shell
+        .status("Created", &format!("{kind} `{name}` package"));
 
     Ok(())
 }

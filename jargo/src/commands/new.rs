@@ -4,8 +4,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use crate::errors::JargoError;
-use crate::manifest::{self, JargoToml};
+use jargo_core::context::GlobalContext;
+use jargo_core::errors::JargoError;
+use jargo_core::manifest::{self, JargoToml};
 
 /// Validate a project name: must be non-empty, start with a letter,
 /// and contain only ASCII lowercase letters, digits, and hyphens.
@@ -46,7 +47,7 @@ pub fn validate_name(name: &str) -> Result<(), JargoError> {
 }
 
 /// Execute `jargo new <name>`.
-pub fn exec(name: &str, is_lib: bool) -> Result<()> {
+pub fn exec(gctx: &GlobalContext, name: &str, is_lib: bool) -> Result<()> {
     validate_name(name)?;
 
     let path = Path::new(name);
@@ -67,7 +68,8 @@ pub fn exec(name: &str, is_lib: bool) -> Result<()> {
         .status();
 
     let kind = if is_lib { "lib" } else { "app" };
-    println!("    Created {kind} `{name}` package");
+    gctx.shell
+        .status("Created", &format!("{kind} `{name}` package"));
 
     Ok(())
 }

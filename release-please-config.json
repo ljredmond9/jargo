@@ -1,6 +1,6 @@
 {
   "packages": {
-    ".": {
+    "jargo": {
       "release-type": "rust",
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
